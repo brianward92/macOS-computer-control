@@ -261,7 +261,8 @@ public enum Verify {
         app: Geometry.AppQuery,
         region: CGRect?,
         fractions: CGRect?,
-        activating: Bool
+        activating: Bool,
+        observedWindow: ((WindowRect) -> Void)? = nil
     ) async -> Look {
         let rect: WindowRect
         do {
@@ -282,6 +283,7 @@ public enum Verify {
         case .success(let shot):
             do {
                 let hits = try Text.find(needle, in: shot)
+                observedWindow?(rect)
                 return hits.isEmpty ? .absent : .seen(hits.map(\.center))
             } catch {
                 return .failed(String(describing: error))
@@ -329,11 +331,47 @@ public enum Verify {
         }
     }
 
-    /// Find text and click it, verifying the target before committing.
+    /// Deliver an observed target only while its window still matches.
     ///
-    /// The geometry is read inside the look, immediately before the click, so
-    /// there is no window in which it can go stale — which is the failure that
-    /// motivated the whole library.
+    /// Check before pointer preparation and again immediately before the press:
+    /// capture/OCR and hover settling both give focus or geometry time to change.
+    /// The callbacks keep this race check testable without posting real input.
+    /// `click` must post directly, without another approach or hover delay.
+    public static func clickObservedTarget(
+        at point: CGPoint,
+        window observed: WindowRect,
+        readWindow: () throws -> WindowRect,
+        prepare: (CGPoint) -> Void,
+        click: (CGPoint) -> Void
+    ) -> Outcome {
+        func check() -> Outcome? {
+            do {
+                let current = try readWindow()
+                guard current.pid == observed.pid, current.windowID == observed.windowID,
+                      current.bounds == observed.bounds else {
+                    return .refused(reason: "target window changed after text was read; no click sent")
+                }
+                guard current.isFrontmost else {
+                    return .refused(reason: "target window lost focus after text was read; no click sent")
+                }
+            } catch GeometryError.windowListUnavailable {
+                return .unknown(reason: "could not recheck the target window; no click sent")
+            } catch let error as GeometryError {
+                return .refused(reason: "\(error); no click sent")
+            } catch {
+                return .unknown(reason: "could not recheck the target window: \(error); no click sent")
+            }
+            return nil
+        }
+        if let problem = check() { return problem }
+        prepare(point)
+        if let problem = check() { return problem }
+        click(point)
+        return .satisfied
+    }
+
+    /// Find text and click it, rechecking the observed window after OCR and hover.
+    /// A changed window is refused without reactivating it or using stale points.
     @discardableResult
     public static func clickText(
         _ needle: String,
@@ -344,10 +382,22 @@ public enum Verify {
         region: CGRect? = nil,
         regionFractions: CGRect? = nil
     ) async -> (Outcome, CGPoint?) {
+        var observed: WindowRect?
         let (outcome, point) = await target(needle, timeout: timeout) {
-            await look(for: needle, app: app, region: region, fractions: regionFractions, activating: true)
+            await look(for: needle, app: app, region: region, fractions: regionFractions,
+                       activating: true, observedWindow: { observed = $0 })
         }
-        if let point { Input.click(at: point, button: button, count: count) }
-        return (outcome, point)
+        guard let point else { return (outcome, nil) }
+        guard let observed else {
+            return (.unknown(reason: "target window was not recorded; no click sent"), nil)
+        }
+        let delivered = clickObservedTarget(at: point, window: observed,
+            readWindow: { try Geometry.windowRect(for: app) },
+            prepare: { point in
+                Input.warp(to: point)
+                usleep(Input.hoverSettleMs * 1000)
+            },
+            click: { Input.click(at: $0, button: button, count: count, approach: nil) })
+        return (delivered, delivered == .satisfied ? point : nil)
     }
 }

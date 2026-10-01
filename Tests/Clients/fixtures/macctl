@@ -1,0 +1,16 @@
+#!/usr/bin/env python3
+"""Subprocess-only macctl fixture: never imports or invokes the real CLI."""
+import json
+import os
+import sys
+
+response = json.loads(os.environ["MACCTL_TEST_RESPONSE"])
+if argv_file := os.environ.get("MACCTL_TEST_ARGV_FILE"):
+    with open(argv_file, "w", encoding="utf-8") as output:
+        json.dump(sys.argv[1:], output)
+if "stdout" in response:
+    sys.stdout.write(response["stdout"])
+elif "data" in response:
+    print(json.dumps(response["data"]))
+sys.stderr.write(response.get("stderr", ""))
+sys.exit(response["code"])

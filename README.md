@@ -128,6 +128,12 @@ Other harnesses take the same thing as a stdio server: command `node`, argument
 the path to `server.js`. `clients/python` and `clients/typescript` hold small
 wrappers for calling the CLI from code.
 
+The Python and TypeScript `read`, `text`, `controls`, and `front` helpers
+raise `ObservationUnknown` when the CLI cannot observe (exit 2), with the full
+result available as `.result`. Successful empty observations keep their usual
+empty return values. Action helpers and `run` preserve exit 2 in their result;
+permission and target refusals remain `Refused` exceptions where checked.
+
 ## Safety
 
 There is none, by design. `macctl` will click Log Out, press Send or quit an
@@ -160,6 +166,10 @@ the first few times it runs, and keep it off screens it has no business with.
 
 `bash scripts/build.sh` is the primary build. `Package.swift` describes the
 same modules for SwiftPM, which needs a working Xcode toolchain.
+
+`bash scripts/test.sh` runs the Swift and CLI checks without posting input.
+`bash scripts/test-clients.sh` tests the Python and TypeScript wrappers against
+a fake CLI; it requires Python 3.10+ and Node 22.6+ with TypeScript stripping.
 
 ## License
 

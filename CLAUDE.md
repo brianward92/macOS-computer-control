@@ -71,6 +71,9 @@ a reason. Look again; never treat it as "did not happen".
 **Never cache a window rectangle.** Coordinates are fractions of the window,
 top-left origin. Geometry is read live inside every command and echoed back
 with `readAt`, so nothing needs retaining between commands.
+`click-text` also rechecks the window identity, bounds, and focus after OCR
+and after moving the pointer. If they changed, it sends no click and reports
+the reason; read the screen again before deciding what to do next.
 
 ## Reading a result
 

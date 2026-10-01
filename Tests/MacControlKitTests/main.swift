@@ -285,6 +285,57 @@ expect(outcome.exitCode == 2, "never observing the window is unknown")
 expect(Outcome.refused(reason: "x").exitCode == 4 && Outcome.unknown(reason: "x").exitCode == 2,
        "outcome exit codes follow the contract")
 
+// MARK: - Verify: text targets must survive OCR and pointer preparation
+
+do {
+    let observed = WindowRect(windowID: 10, pid: 20,
+                              bounds: CGRect(x: 100, y: 80, width: 400, height: 300),
+                              isFrontmost: true, readAt: Date(timeIntervalSince1970: 1))
+    let point = observed.at(0.5, 0.5)
+    func changed(id: CGWindowID = 10, pid: pid_t = 20, bounds: CGRect? = nil,
+                 frontmost: Bool = true) -> WindowRect {
+        WindowRect(windowID: id, pid: pid, bounds: bounds ?? observed.bounds,
+                   isFrontmost: frontmost, windowCount: 2, readAt: Date(timeIntervalSince1970: 2))
+    }
+    let races: [(String, Result<WindowRect, GeometryError>, Int32)] = [
+        ("focus moved to another app", .success(changed(frontmost: false)), 4),
+        ("a different window came forward", .success(changed(id: 11)), 4),
+        ("another process replaced the target", .success(changed(pid: 21)), 4),
+        ("the window moved", .success(changed(bounds: observed.bounds.offsetBy(dx: 30, dy: 20))), 4),
+        ("the window resized", .success(changed(bounds: CGRect(x: 100, y: 80, width: 500, height: 300))), 4),
+        ("the window closed", .failure(.noOnScreenWindow("Example App")), 4),
+        ("the app quit", .failure(.noMatchingApp("Example App")), 4),
+        ("the window server could not be read", .failure(.windowListUnavailable), 2),
+    ]
+    for (why, reading, code) in races {
+        // The same race can occur during capture/OCR or during the intentional
+        // hover delay. Neither phase may deliver the old absolute click point.
+        for duringHover in [false, true] {
+            var prepared = false
+            var clicks: [CGPoint] = []
+            let result = Verify.clickObservedTarget(at: point, window: observed,
+                readWindow: {
+                    if duringHover && !prepared { return observed }
+                    return try reading.get()
+                },
+                prepare: { _ in prepared = true },
+                click: { clicks.append($0) })
+            expect(result.exitCode == code, "\(why), hover=\(duringHover): preserves refusal/unknown outcome")
+            expect(clicks.isEmpty, "\(why), hover=\(duringHover): no stale click is posted")
+            expect(prepared == duringHover, "\(why): a race already observed after OCR does not move the pointer")
+        }
+    }
+    var steps: [String] = []
+    var clicks: [CGPoint] = []
+    let delivered = Verify.clickObservedTarget(at: point, window: observed,
+        readWindow: { steps.append("check"); return changed() },
+        prepare: { _ in steps.append("prepare") },
+        click: { steps.append("click"); clicks.append($0) })
+    expect(delivered == .satisfied && clicks == [point], "unchanged geometry delivers the observed point once")
+    expect(steps == ["check", "prepare", "check", "click"],
+           "the last geometry check follows hover preparation immediately before delivery")
+}
+
 // MARK: - Accessibility: selecting a control
 
 typealias AXControl = Accessibility.Control

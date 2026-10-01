@@ -3,7 +3,9 @@
  *
  * The CLI is the contract; this only saves subprocess boilerplate. Exit codes
  * are preserved because they carry meaning the JSON does not: 2 means "could
- * not observe", which is not the same as failure.
+ * not observe", which is not the same as failure. Payload-unwrapping helpers
+ * throw ObservationUnknown for exit 2; empty payloads still mean a successful
+ * observation of no content.
  */
 import { execFileSync } from 'node:child_process'
 
@@ -19,21 +21,45 @@ export interface Result {
 
 export class Refused extends Error {}
 
+/** An observation helper could not return a successful payload. */
+export class ObservationError extends Error {
+  readonly result: Result
+  constructor(result: Result) {
+    super(result.reason ?? `macctl observation exited ${result.code}`)
+    this.name = new.target.name
+    this.result = result
+  }
+}
+
+/** Exit 2: could not observe, or invalid usage; not evidence of absence. */
+export class ObservationUnknown extends ObservationError {}
+
 export function run(...args: (string | number)[]): Result {
   let stdout = ''
+  let stderr = ''
   let code = 0
   try {
-    stdout = execFileSync('macctl', args.map(String), { encoding: 'utf8' })
+    stdout = execFileSync('macctl', args.map(String), { encoding: 'utf8', stdio: 'pipe' })
   } catch (err) {
     const e = err as { status?: number; stdout?: string; stderr?: string }
-    code = e.status ?? 1
+    // A launch failure or killed process is not an observed, unsatisfied result.
+    if (typeof e.status !== 'number') throw err
+    code = e.status
     stdout = e.stdout ?? ''
+    stderr = e.stderr ?? ''
   }
   const lines = stdout.trim().split('\n').filter(Boolean)
   const data = lines.length ? (JSON.parse(lines[lines.length - 1]) as Record<string, unknown>) : {}
-  const reason = (data.outcome as string) ?? (data.error as string) ?? undefined
+  const reason = (data.outcome as string) ?? (data.error as string) ?? (stderr.trim() || undefined)
   if (code === 3 || code === 4) throw new Refused(reason ?? `macctl exited ${code}`)
   return { code, data, satisfied: code === 0, unknown: code === 2, reason }
+}
+
+function observation(...args: (string | number)[]): Record<string, unknown> {
+  const result = run(...args)
+  if (result.unknown) throw new ObservationUnknown(result)
+  if (!result.satisfied) throw new ObservationError(result)
+  return result.data
 }
 
 export const window = (app: string) => run('window', app)
@@ -47,11 +73,12 @@ export const clickText = (app: string, text: string, timeout = 0) =>
 export const verify = (app: string, text: string) => run('verify', app, text)
 export const waitFor = (app: string, text: string, timeout = 30) =>
   run('wait-for', app, text, '--timeout', timeout)
+/** OCR lines; throws ObservationUnknown when the screen could not be read. */
 export const read = (app: string) =>
-  run('read', app).data.lines as { text: string; at: [number, number] }[]
+  observation('read', app).lines as { text: string; at: [number, number] }[]
 
 /** The app's text via accessibility, OCR as fallback. Prefer over read for content. */
-export const text = (app: string) => (run('text', app).data.text as string) ?? ''
+export const text = (app: string) => (observation('text', app).text as string) ?? ''
 /** Open a URL in a browser and return once the page has loaded. */
 export const navigate = (app: string, url: string, timeout = 15) =>
   run('navigate', app, url, '--timeout', timeout)
@@ -59,13 +86,13 @@ export const navigate = (app: string, url: string, timeout = 15) =>
 export const waitIdle = (app: string, timeout = 10) => run('wait-idle', app, '--timeout', timeout)
 /** Actionable controls by name, via accessibility. */
 export const controls = (app: string) =>
-  run('controls', app).data.controls as { role: string; label: string; value?: string; at: [number, number] }[]
+  observation('controls', app).controls as { role: string; label: string; value?: string; at: [number, number] }[]
 /** Press a control by name via accessibility. Works where posted clicks are swallowed. */
 export const activate = (app: string, control: string) => run('activate', app, control)
 /** Set a popup menu to a value via accessibility; the result carries before/after. */
 export const choose = (app: string, popup: string, value: string) => run('choose', app, popup, value)
 /** The frontmost app right now. */
-export const front = () => run('front').data.front as { name: string; pid: number; bundleID?: string } | null
+export const front = () => observation('front').front as { name: string; pid: number; bundleID?: string } | null
 /** Bring an app to the front and stop. */
 export const focus = (app: string) => run('focus', app)
 /**

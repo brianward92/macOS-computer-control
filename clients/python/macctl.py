@@ -1,9 +1,10 @@
 """Intentionally partial Python wrapper over the macctl CLI.
 
 The CLI is the contract; this only saves you writing subprocess boilerplate.
-Every call returns the parsed JSON line plus the exit code, because the exit
-code carries meaning the JSON does not: 2 is "could not observe", which is not
-the same as failure.
+run() and action helpers return the parsed JSON line plus the exit code,
+because 2 is "could not observe", which is not the same as failure. Helpers
+that unwrap observation payloads raise ObservationUnknown for exit 2; an empty
+list/string or None therefore still means a successfully observed empty result.
 """
 from __future__ import annotations
 
@@ -21,6 +22,7 @@ class Refused(RuntimeError):
 class Result:
     code: int
     data: dict[str, Any]
+    stderr: str = ""
 
     @property
     def satisfied(self) -> bool:
@@ -33,7 +35,23 @@ class Result:
 
     @property
     def reason(self) -> str | None:
-        return self.data.get("outcome") or self.data.get("error")
+        return self.data.get("outcome") or self.data.get("error") or self.stderr.strip() or None
+
+
+class ObservationError(RuntimeError):
+    """An observation helper could not return a successful payload.
+
+    The complete CLI result is available as ``result``; successful empty
+    observations never raise this exception.
+    """
+
+    def __init__(self, result: Result):
+        self.result = result
+        super().__init__(result.reason or f"macctl observation exited {result.code}")
+
+
+class ObservationUnknown(ObservationError):
+    """Exit 2: could not observe, or invalid usage; not evidence of absence."""
 
 
 def run(*args: str, check: bool = False) -> Result:
@@ -42,10 +60,19 @@ def run(*args: str, check: bool = False) -> Result:
     )
     line = proc.stdout.strip().splitlines()
     data = json.loads(line[-1]) if line else {}
-    result = Result(proc.returncode, data)
+    result = Result(proc.returncode, data, proc.stderr)
     if check and proc.returncode in (3, 4):
         raise Refused(result.reason or proc.stderr.strip())
     return result
+
+
+def _observation(*args: str) -> dict[str, Any]:
+    result = run(*args, check=True)
+    if result.unknown:
+        raise ObservationUnknown(result)
+    if not result.satisfied:
+        raise ObservationError(result)
+    return result.data
 
 
 def window(app: str) -> Result:
@@ -74,12 +101,13 @@ def wait_for(app: str, text: str, timeout: float = 30) -> Result:
 
 
 def read(app: str) -> list[dict[str, Any]]:
-    return run("read", app, check=True).data.get("lines", [])
+    """OCR lines; raises ObservationUnknown when the screen could not be read."""
+    return _observation("read", app).get("lines", [])
 
 
 def text(app: str) -> str:
     """The app's text via accessibility, OCR as fallback. Prefer over read for content."""
-    return run("text", app, check=True).data.get("text", "")
+    return _observation("text", app).get("text", "")
 
 
 def navigate(app: str, url: str, timeout: float = 15) -> Result:
@@ -94,7 +122,7 @@ def wait_idle(app: str, timeout: float = 10) -> Result:
 
 def controls(app: str) -> list[dict[str, Any]]:
     """Actionable controls by name, via accessibility."""
-    return run("controls", app, check=True).data.get("controls", [])
+    return _observation("controls", app).get("controls", [])
 
 
 def activate(app: str, control: str) -> Result:
@@ -109,7 +137,7 @@ def choose(app: str, popup: str, value: str) -> Result:
 
 def front() -> dict[str, Any] | None:
     """The frontmost app right now."""
-    return run("front").data.get("front")
+    return _observation("front").get("front")
 
 
 def focus(app: str) -> Result:
