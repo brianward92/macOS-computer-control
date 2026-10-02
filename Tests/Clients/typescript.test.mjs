@@ -33,6 +33,7 @@ const helpers = {
   read: () => macctl.read('Example App'),
   text: () => macctl.text('Example App'),
   controls: () => macctl.controls('Example App'),
+  browser: () => macctl.browser('Example App'),
   front: () => macctl.front()
 }
 
@@ -49,6 +50,24 @@ test('successful nonempty observations preserve their payloads', () => {
   for (const [name, field] of [['read', 'lines'], ['text', 'text'], ['controls', 'controls'], ['front', 'front']]) {
     assert.deepEqual(helpers[name](), payload[field], name)
   }
+})
+test('browser returns the native snapshot with explicit null evidence', () => {
+  const payload = { ok: true, readAt: '2026-10-02T18:00:00Z', app: 'Safari', pid: 123,
+    source: 'accessibility', window: { title: 'Example', identifier: null, source: 'AXFocusedWindow' },
+    page: { url: 'https://example.com', title: 'Example', loaded: null, loadingProgress: null,
+      busy: null, source: 'AXWebArea.AXURL', reason: null },
+    address: { value: 'example.com', focused: false, source: 'AXTextField.WEB_BROWSER_ADDRESS_AND_SEARCH_FIELD' },
+    tabs: [{ title: 'Example', selected: true, identifier: null, index: null }], complete: true }
+  respond(0, payload)
+  assert.deepEqual(macctl.browser('Safari'), payload)
+  assert.deepEqual(argv(), ['browser', '--', 'Safari'])
+})
+test('controls preserve native attributes including nullable values and screen-point bounds', () => {
+  const control = { role: 'AXTextField', label: 'Name', value: null, identifier: 'name-field',
+    url: null, placeholder: 'Enter name', at: [200, 150], bounds: [100, 125, 200, 50],
+    focused: null, enabled: true, pressable: false, valueSettable: true, secure: false }
+  respond(0, { controls: [control] })
+  assert.deepEqual(macctl.controls('Example App'), [control])
 })
 test('unknown is never an empty or partial observation', () => {
   for (const payload of [
@@ -108,6 +127,7 @@ test('Result-returning helpers retain unknown without throwing', () => {
     () => macctl.clickText('Example App', 'Open'), () => macctl.verify('Example App', 'Saved'),
     () => macctl.waitFor('Example App', 'Saved'), () => macctl.navigate('Example App', 'about:blank'),
     () => macctl.waitIdle('Example App'), () => macctl.activate('Example App', 'Open'),
+    () => macctl.setValue('Example App', 'Example', { identifier: 'name' }),
     () => macctl.choose('Example App', 'Off', 'On'), () => macctl.focus('Example App'), () => macctl.restore()]
   for (const call of calls) {
     const result = call()
@@ -131,4 +151,50 @@ test('failure to launch the CLI cannot become an unsatisfied observation', () =>
   process.env.PATH = directory
   assert.throws(() => macctl.run('read', 'Example App'), error => error.code === 'ENOENT')
   assert.throws(() => macctl.read('Example App'), error => error.code === 'ENOENT')
+})
+
+function argv() { return JSON.parse(readFileSync(process.env.MACCTL_TEST_ARGV_FILE, 'utf8')) }
+
+test('selectors and literal positionals reach the CLI', () => {
+  const options = { scope: 'window', role: 'AXTextField', identifier: 'field.id',
+    match: '--literal ; $(not-a-command)', exact: true }
+  const flags = ['--scope', 'window', '--role', 'AXTextField', '--identifier', 'field.id',
+    '--match', options.match, '--exact']
+  const app = '--Example App'
+  respond(0, { controls: [] })
+  macctl.controls(app, options)
+  assert.deepEqual(argv(), ['controls', ...flags, '--', app])
+  macctl.activate(app, options)
+  assert.deepEqual(argv(), ['activate', ...flags, '--', app])
+  macctl.activate(app, '--Open', options)
+  assert.deepEqual(argv(), ['activate', ...flags, '--', app, '--Open'])
+  const value = '--value\n\'"` $(not-a-command)'
+  macctl.setValue(app, value, options)
+  assert.deepEqual(argv(), ['set-value', ...flags, '--', app, value])
+  macctl.browser(app)
+  assert.deepEqual(argv(), ['browser', '--', app])
+})
+test('existing calls and empty values are preserved', () => {
+  respond(0, { controls: [] })
+  macctl.controls('Example App')
+  assert.deepEqual(argv(), ['controls', '--', 'Example App'])
+  macctl.activate('Example App', 'Open')
+  assert.deepEqual(argv(), ['activate', '--', 'Example App', 'Open'])
+  macctl.setValue('Example App', '', { match: '', exact: false })
+  assert.deepEqual(argv(), ['set-value', '--match', '', '--', 'Example App', ''])
+})
+test('setValue retains observed mismatch and unknown readback', () => {
+  for (const [code, after, verified] of [[0, 'new', true], [1, 'old', false], [2, null, null]]) {
+    const payload = { before: 'old', after, verified }
+    respond(code, payload)
+    const result = macctl.setValue('Example App', 'new', { identifier: 'name' })
+    assert.equal(result.code, code)
+    assert.equal(result.satisfied, code === 0)
+    assert.equal(result.unknown, code === 2)
+    assert.deepEqual(result.data, payload)
+  }
+  for (const code of [3, 4]) {
+    respond(code, { outcome: 'refused: unavailable' })
+    assert.throws(() => macctl.setValue('Example App', 'new', { identifier: 'name' }), macctl.Refused)
+  }
 })

@@ -31,6 +31,7 @@ class ClientTests(unittest.TestCase):
             "read": lambda: macctl.read("Example App"),
             "text": lambda: macctl.text("Example App"),
             "controls": lambda: macctl.controls("Example App"),
+            "browser": lambda: macctl.browser("Example App"),
             "front": macctl.front,
         }
 
@@ -54,6 +55,14 @@ class ClientTests(unittest.TestCase):
         for name, field in [("read", "lines"), ("text", "text"), ("controls", "controls"), ("front", "front")]:
             with self.subTest(helper=name):
                 self.assertEqual(self.helpers[name](), payload[field])
+
+    def test_browser_returns_the_whole_snapshot_without_hiding_incompleteness(self):
+        payload = {"ok": True, "readAt": "2026-10-02T18:00:00Z", "app": "Safari", "pid": 123,
+                   "window": {"title": "Example"}, "page": {"url": "https://example.com"},
+                   "address": None, "tabs": [{"title": "Example", "selected": True}], "complete": False}
+        self.respond(0, payload)
+        self.assertEqual(macctl.browser("Safari"), payload)
+        self.assertEqual(self.argv(), ["browser", "--", "Safari"])
 
     def test_unknown_is_not_an_empty_or_partial_observation(self):
         for payload in [
@@ -107,6 +116,7 @@ class ClientTests(unittest.TestCase):
                  lambda: macctl.click_text("Example App", "Open"), lambda: macctl.verify("Example App", "Saved"),
                  lambda: macctl.wait_for("Example App", "Saved"), lambda: macctl.navigate("Example App", "about:blank"),
                  lambda: macctl.wait_idle("Example App"), lambda: macctl.activate("Example App", "Open"),
+                 lambda: macctl.set_value("Example App", "Example", identifier="name"),
                  lambda: macctl.choose("Example App", "Off", "On"), lambda: macctl.focus("Example App"), macctl.restore]
         for call in calls:
             result = call()
@@ -123,6 +133,51 @@ class ClientTests(unittest.TestCase):
         app = "Example App ; $(not-a-command)"
         self.assertEqual(macctl.text(app), "literal")
         self.assertEqual(json.loads(Path(os.environ["MACCTL_TEST_ARGV_FILE"]).read_text()), ["text", app])
+
+    def argv(self):
+        return json.loads(Path(os.environ["MACCTL_TEST_ARGV_FILE"]).read_text())
+
+    def test_selectors_and_literal_positionals_reach_the_cli(self):
+        selectors = dict(scope="window", role="AXTextField", identifier="field.id",
+                         match="--literal ; $(not-a-command)", exact=True)
+        flags = ["--scope", "window", "--role", "AXTextField", "--identifier", "field.id",
+                 "--match", selectors["match"], "--exact"]
+        app = "--Example App"
+        self.respond(0, {"controls": []})
+        macctl.controls(app, **selectors)
+        self.assertEqual(self.argv(), ["controls", *flags, "--", app])
+        macctl.activate(app, **selectors)
+        self.assertEqual(self.argv(), ["activate", *flags, "--", app])
+        macctl.activate(app, "--Open", **selectors)
+        self.assertEqual(self.argv(), ["activate", *flags, "--", app, "--Open"])
+        value = "--value\n'\"` $(not-a-command)"
+        macctl.set_value(app, value, **selectors)
+        self.assertEqual(self.argv(), ["set-value", *flags, "--", app, value])
+        macctl.browser(app)
+        self.assertEqual(self.argv(), ["browser", "--", app])
+
+    def test_existing_calls_and_empty_values_are_preserved(self):
+        self.respond(0, {"controls": []})
+        macctl.controls("Example App")
+        self.assertEqual(self.argv(), ["controls", "--", "Example App"])
+        macctl.activate("Example App", "Open")
+        self.assertEqual(self.argv(), ["activate", "--", "Example App", "Open"])
+        macctl.set_value("Example App", "", match="", exact=False)
+        self.assertEqual(self.argv(), ["set-value", "--match", "", "--", "Example App", ""])
+
+    def test_set_value_retains_observed_mismatch_and_unknown_readback(self):
+        for code, after, verified in [(0, "new", True), (1, "old", False), (2, None, None)]:
+            payload = {"before": "old", "after": after, "verified": verified}
+            self.respond(code, payload)
+            result = macctl.set_value("Example App", "new", identifier="name")
+            self.assertEqual(result.code, code)
+            self.assertEqual(result.satisfied, code == 0)
+            self.assertEqual(result.unknown, code == 2)
+            self.assertEqual(result.data, payload)
+        for code in (3, 4):
+            self.respond(code, {"outcome": "refused: unavailable"})
+            with self.assertRaises(macctl.Refused):
+                macctl.set_value("Example App", "new", identifier="name")
 
 
 if __name__ == "__main__":

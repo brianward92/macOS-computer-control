@@ -111,7 +111,11 @@ def text(app: str) -> str:
 
 
 def navigate(app: str, url: str, timeout: float = 15) -> Result:
-    """Open a URL in a browser and return once the page has loaded."""
+    """Ask the browser to open a URL, then wait for observed text to settle.
+
+    The browser's external-open policy may create a tab. Settled text is not
+    proof that the requested page is ready; verify the intended page state.
+    """
     return run("navigate", app, url, "--timeout", timeout, check=True)
 
 
@@ -120,14 +124,63 @@ def wait_idle(app: str, timeout: float = 10) -> Result:
     return run("wait-idle", app, "--timeout", timeout)
 
 
-def controls(app: str) -> list[dict[str, Any]]:
-    """Actionable controls by name, via accessibility."""
-    return _observation("controls", app).get("controls", [])
+def browser(app: str) -> dict[str, Any]:
+    """Read the browser's AX snapshot, including page, address and exposed tabs.
+
+    Returns the complete successful JSON payload. Check ``complete`` before
+    treating omitted information as absent; unknown observations raise.
+    """
+    return _observation("browser", "--", app)
 
 
-def activate(app: str, control: str) -> Result:
-    """Press a control by name via accessibility. Works where posted clicks are swallowed."""
-    return run("activate", app, control, check=True)
+def _selector_args(*, match: str | None, role: str | None,
+                   identifier: str | None, scope: str | None, exact: bool) -> list[str]:
+    args = []
+    for name, value in (("scope", scope), ("role", role), ("identifier", identifier), ("match", match)):
+        if value is not None:
+            args.extend((f"--{name}", value))
+    if exact:
+        args.append("--exact")
+    return args
+
+
+def controls(app: str, *, match: str | None = None, role: str | None = None,
+             identifier: str | None = None, scope: str | None = None,
+             exact: bool = False) -> list[dict[str, Any]]:
+    """Read accessible controls filtered by label, role or identifier.
+
+    ``scope`` is ``app`` (the CLI default) or ``window``. Selectors combine;
+    ``exact`` asks for a whole-label match instead of a substring.
+    """
+    selectors = _selector_args(match=match, role=role, identifier=identifier, scope=scope, exact=exact)
+    return _observation("controls", *selectors, "--", app).get("controls", [])
+
+
+def activate(app: str, control: str | None = None, *, match: str | None = None,
+             role: str | None = None, identifier: str | None = None,
+             scope: str | None = None, exact: bool = False) -> Result:
+    """Press one accessible control by name or selectors; refuse ambiguity.
+
+    ``control`` is the original positional label. It may be omitted when
+    selecting by ``match``, ``role`` or ``identifier``. Verify the effect after
+    activation; delivery alone does not establish the resulting app state.
+    """
+    selectors = _selector_args(match=match, role=role, identifier=identifier, scope=scope, exact=exact)
+    positionals = [app] if control is None else [app, control]
+    return run("activate", *selectors, "--", *positionals, check=True)
+
+
+def set_value(app: str, value: str, *, match: str | None = None,
+              role: str | None = None, identifier: str | None = None,
+              scope: str | None = None, exact: bool = False) -> Result:
+    """Set one selected control's native AX value and return its readback.
+
+    The payload carries ``before``, ``after`` and ``verified``. Exit 0 means
+    exact readback, 1 an observed mismatch, and 2 an unknown result. A value
+    write does not submit a form or establish any later application effect.
+    """
+    selectors = _selector_args(match=match, role=role, identifier=identifier, scope=scope, exact=exact)
+    return run("set-value", *selectors, "--", app, value, check=True)
 
 
 def choose(app: str, popup: str, value: str) -> Result:

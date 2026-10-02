@@ -12,7 +12,7 @@ swiftc "${FLAGS[@]}" -parse-as-library -emit-library -static -emit-module \
     -module-name MacControlKit -o "$TEST_OUT/libMacControlKit.a" \
     Sources/MacControlKit/*.swift
 swiftc "${FLAGS[@]}" -I "$TEST_OUT" -L "$TEST_OUT" -lMacControlKit \
-    -o "$TEST_OUT/macctl-tests" Tests/MacControlKitTests/main.swift
+    -o "$TEST_OUT/macctl-tests" Tests/MacControlKitTests/*.swift
 "$TEST_OUT/macctl-tests"
 
 swiftc "${FLAGS[@]}" -I "$TEST_OUT" -L "$TEST_OUT" -lMacControlKit \
@@ -38,6 +38,11 @@ check 2 "unknown flag is a usage error" "$MACCTL" click "Example App" 0.5 0.5 --
 check 2 "bad choice is a usage error" "$MACCTL" click "Example App" 0.5 0.5 --button middle
 check 2 "missing positionals are a usage error" "$MACCTL" click-text "Example App"
 check 2 "bad region is a usage error" "$MACCTL" verify "Example App" Open --region 0.1,0.2
+check 2 "unknown control scope is a usage error" "$MACCTL" controls "Example App" --scope all
+check 2 "empty identifier is a usage error" "$MACCTL" controls "Example App" --identifier ''
+check 2 "exact requires a label" "$MACCTL" controls "Example App" --exact
+check 2 "set-value requires a selector" "$MACCTL" set-value "Example App" text
+check 2 "activate rejects competing label arguments" "$MACCTL" activate "Example App" Save --match Cancel
 check 4 "restore with nothing recorded is refused before doing anything" "$MACCTL" restore
 check 0 "restore --forget with nothing recorded is fine" "$MACCTL" restore --forget
 check 0 "front reports origin null when nothing is recorded" \

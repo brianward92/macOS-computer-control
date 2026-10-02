@@ -68,6 +68,14 @@ let buttonFlag = Flag("button", value: "left|right", choices: ["left", "right"],
 let countFlag = Flag("count", value: "N", fallback: "1", summary: "clicks; 2 is a real double click")
 let appFlag = Flag("app", value: "<app>",
                    summary: "bring this app to the front first; refuse if it will not come")
+let controlFlags = [
+    Flag("scope", value: "app|window", choices: ["app", "window"], fallback: "app",
+         summary: "search the whole app or only its focused accessible window"),
+    Flag("role", value: "AXRole", summary: "require this exact accessibility role"),
+    Flag("identifier", value: "ID", summary: "require this exact app-provided accessibility identifier"),
+    Flag("match", value: "TEXT", summary: "match a control's label or current value"),
+    Flag("exact", summary: "require a whole label or value; disable substring fallback"),
+]
 
 let commands: [Command] = [
     Command("doctor", summary: "what is permitted and what is not"),
@@ -88,7 +96,8 @@ let commands: [Command] = [
     Command("restore", summary: "bring back the app that was in front before the first focus change, and clear the record", flags: [
         Flag("forget", summary: "clear the record without moving focus, when the task was meant to land them elsewhere"),
     ]),
-    Command("navigate", ["<app>", "<url>"], summary: "open a URL in a browser and return when the page has settled", flags: [
+    Command("browser", ["<app>"], summary: "observe browser window, committed page URL, address text and tabs via accessibility"),
+    Command("navigate", ["<app>", "<url>"], summary: "open a URL using browser policy, then wait for stable app text; may open a new tab", flags: [
         Flag("timeout", value: "S", fallback: "15", summary: "give up waiting for the page after this long"),
     ]),
     Command("wait-idle", ["<app>"], summary: "return the instant an app's text stops changing, instead of a fixed sleep", flags: [
@@ -148,8 +157,9 @@ let commands: [Command] = [
         Flag("min-chars", value: "N", fallback: "40", summary: "below this, accessibility is treated as empty and OCR takes over"),
         regionFlag,
     ]),
-    Command("controls", ["<app>"], summary: "actionable controls via accessibility, by name — no OCR"),
-    Command("activate", ["<app>", "<control>"], summary: "press a control by name through accessibility"),
+    Command("controls", ["<app>"], summary: "discover accessibility controls with identifiers and optional scope/filters", flags: controlFlags),
+    Command("activate", ["<app>", "[<control>]"], summary: "press one accessibility control selected by label, role or identifier", flags: controlFlags),
+    Command("set-value", ["<app>", "<value>"], summary: "set one accessibility text field directly and read its value back", flags: controlFlags),
     Command("choose", ["<app>", "<popup>", "<value>"], summary: "set a popup menu to a value through accessibility"),
     Command("help", summary: "this text", flags: [
         Flag("json", summary: "the whole contract, machine readable"),
@@ -170,6 +180,9 @@ let notes: [String] = [
     "Exit 2 is 'could not observe', not 'did not happen'. Reading an animated control misses roughly one look in eight, so verify reports absence only after three consecutive misses.",
     "An app name is a bundle id, an exact name, or a substring of a name that matches exactly one running app. A substring matching several is refused (exit 4).",
     "The app's window is its front on-screen window. Input commands bring the app to the front first and refuse (exit 4) if it will not come.",
+    "Use controls --scope window for focused discovery without the app's menus and other windows. Reuse the same scope and selectors for activate or set-value. Identifiers are supplied by the app and may be absent or duplicated; ambiguous selections are refused.",
+    "browser observes the committed page URL separately from editable address text. Tab indices and identifiers are observations, not durable handles. Missing browser attributes are reported as unknown, never inferred from typed text.",
+    "navigate follows the browser's external-open policy and may create a tab. settled means only app text stopped changing, not that the requested page or application data loaded. Check browser and an expected page condition.",
     "--screen reads the main display instead of a window. Anything outside the app — a system dialog, a Screen Time shield, the Dock — is only found this way.",
     "--region crops to a fraction of the window before reading. Text boxes sharing a row are merged into one line with no horizontal limit, so a whole-window read welds a row of items into one string; use --region or read --boxes for anything laid out in a row.",
     "Flags are --name or --name=value. Anything after a bare -- is positional. Unknown flags are errors, not ignored.",
@@ -321,7 +334,14 @@ func exitCode(for error: Error) -> Int32 {
         switch e {
         case .notTrusted: return 3
         case .appNotFound, .noWindow, .noControl, .ambiguous, .notActionable, .notAPopup, .valueNotInMenu: return 4
+        case .emptySelector, .incompleteSearch: return 2
+        case .disabled, .notSettable, .secureField, .scopeChanged: return 4
         case .actionFailed: return 1
+        }
+    case let e as Browser.ObservationError:
+        switch e {
+        case .ambiguousProcesses, .ambiguousWindows: return 4
+        case .incompleteWindowList, .changed: return 2
         }
     case is Arguments.ParseError:
         return 2
@@ -441,6 +461,47 @@ func rectInfo(_ r: WindowRect) -> [String: Any] {
                 "frontmost": r.isFrontmost,
                 "windows": r.windowCount,
                 "readAt": ISO8601DateFormatter().string(from: r.readAt)]]
+}
+
+@MainActor
+func controlSelector(positional: String? = nil) -> Accessibility.Selector {
+    if positional != nil, parsed.option("match") != nil {
+        fail("use either a positional control label or --match, not both", code: 2)
+    }
+    for name in ["role", "identifier", "match"] {
+        if let value = parsed.option(name), value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            fail("--\(name) must not be empty", code: 2)
+        }
+    }
+    let needle = positional ?? parsed.option("match")
+    if let needle, needle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        fail("a control label must not be empty", code: 2)
+    }
+    if parsed.flag("exact"), needle == nil {
+        fail("--exact needs a control label or --match", code: 2)
+    }
+    return Accessibility.Selector(needle: needle, role: parsed.option("role"),
+                                  identifier: parsed.option("identifier"), exact: parsed.flag("exact"))
+}
+
+func controlScope() -> Accessibility.Scope {
+    Accessibility.Scope(rawValue: parsed.option("scope") ?? "app") ?? .app
+}
+
+func controlInfo(_ c: Accessibility.Control) -> [String: Any] {
+    var entry: [String: Any] = ["role": c.role, "label": c.label,
+                               "at": [c.center.x, c.center.y], "enabled": c.enabled,
+                               "pressable": c.pressable, "valueSettable": c.valueSettable,
+                               "secure": c.secure]
+    entry["value"] = c.value.map { $0 as Any } ?? NSNull()
+    entry["identifier"] = c.identifier.map { $0 as Any } ?? NSNull()
+    entry["url"] = c.url.map { $0 as Any } ?? NSNull()
+    entry["placeholder"] = c.placeholder.map { $0 as Any } ?? NSNull()
+    entry["focused"] = c.focused.map { $0 as Any } ?? NSNull()
+    if let bounds = c.bounds {
+        entry["bounds"] = [bounds.minX, bounds.minY, bounds.width, bounds.height]
+    } else { entry["bounds"] = NSNull() }
+    return entry
 }
 
 @MainActor
@@ -716,10 +777,22 @@ case "focus":
         emit(["ok": true, "app": parsed.positionals[0]].merging(rectInfo(r)) { a, _ in a })
     } catch { fail(error) }
 
+case "browser":
+    need(1)
+    do {
+        let snapshot = try Browser.snapshot(Geometry.AppQuery(parsed.positionals[0]))
+        let data = try JSONEncoder().encode(snapshot)
+        var result = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        result["ok"] = snapshot.complete
+        result["source"] = "accessibility"
+        if !snapshot.complete { result["outcome"] = "unknown: browser accessibility tree was incomplete" }
+        emit(result)
+        exit(snapshot.complete ? 0 : 2)
+    } catch { fail(error) }
+
 case "navigate":
-    // Open a URL and return when the page has actually loaded, not after a
-    // guessed sleep. The baseline text is captured first so a still-showing
-    // old page cannot be mistaken for the new one.
+    // External-open policy may create a tab. Text stability is only an
+    // observation; a stable browser shell does not prove a page has loaded.
     need(2)
     recordOriginIfFocusChanging()
     let app = parsed.positionals[0]
@@ -744,8 +817,12 @@ case "navigate":
     }
     do {
         let settled = try Accessibility.settle(Geometry.AppQuery(app), changedFrom: baseline, timeout: navTimeout)
-        emit(["ok": true, "app": app, "url": url, "settled": settled.stabilised,
-              "waited": (settled.waited * 100).rounded() / 100, "chars": settled.text.text.count])
+        var result: [String: Any] = ["ok": settled.stabilised, "app": app, "url": url,
+              "settled": settled.stabilised, "verified": false, "observation": "app-text-stability",
+              "waited": (settled.waited * 100).rounded() / 100, "chars": settled.text.text.count]
+        if !settled.stabilised { result["outcome"] = "unknown: app text did not settle before the timeout" }
+        emit(result)
+        exit(settled.stabilised ? 0 : 2)
     } catch { fail(error) }
 
 case "wait-idle":
@@ -999,30 +1076,59 @@ case "text":
 
 case "controls":
     need(1)
+    let selector = controlSelector()
+    let scope = controlScope()
     do {
-        let controls = try Accessibility.controls(Geometry.AppQuery(parsed.positionals[0]))
-        emit(["ok": true, "app": parsed.positionals[0], "controls": controls.map { c -> [String: Any] in
-            var entry: [String: Any] = ["role": c.role, "label": c.label,
-                                        "at": [c.center.x, c.center.y],
-                                        "enabled": c.enabled, "pressable": c.pressable]
-            if let value = c.value { entry["value"] = value }
-            return entry
-        }])
+        let found = try Accessibility.discover(Geometry.AppQuery(parsed.positionals[0]), scope: scope, selector: selector)
+        var result: [String: Any] = ["ok": !found.truncated, "app": parsed.positionals[0],
+                                    "scope": scope.rawValue, "truncated": found.truncated,
+                                    "visited": found.visited, "controls": found.controls.map(controlInfo)]
+        if found.truncated { result["outcome"] = "unknown: accessibility search was truncated; results may be incomplete" }
+        emit(result)
+        exit(found.truncated ? 2 : 0)
     } catch { fail(error) }
 
 case "activate":
-    need(2)
+    need(1)
+    guard parsed.positionals.count <= 2 else { usageFailure() }
+    let selector = controlSelector(positional: parsed.positionals.count == 2 ? parsed.positionals[1] : nil)
+    guard selector.needle != nil || selector.role != nil || selector.identifier != nil else {
+        fail("activate needs a control label, --match, --role, or --identifier", code: 2)
+    }
+    let scope = controlScope()
     requireInputPreconditions()
-    let app = parsed.positionals[0], needle = parsed.positionals[1]
+    let app = parsed.positionals[0]
     do {
-        let control = try Accessibility.activate(Geometry.AppQuery(app), matching: needle)
+        let control = try Accessibility.activate(Geometry.AppQuery(app), scope: scope, selector: selector)
         // verified:false for the same reason as click: the action was
         // delivered to the element, which is far surer than a posted click,
         // but is still not proof the app finished reacting. Confirm with
         // verify or wait-for --gone when it matters.
-        emit(["ok": true, "app": app, "needle": needle, "verified": false,
-              "control": ["role": control.role, "label": control.label,
-                          "at": [control.center.x, control.center.y]]])
+        emit(["ok": true, "app": app, "needle": selector.needle.map { $0 as Any } ?? NSNull(),
+              "scope": scope.rawValue, "verified": false, "control": controlInfo(control)])
+    } catch { fail(error) }
+
+case "set-value":
+    need(2)
+    guard parsed.positionals.count == 2 else { usageFailure() }
+    let selector = controlSelector()
+    guard selector.needle != nil || selector.role != nil || selector.identifier != nil else {
+        fail("set-value needs --match, --role, or --identifier", code: 2)
+    }
+    let scope = controlScope()
+    requireInputPreconditions()
+    let app = parsed.positionals[0]
+    do {
+        let change = try Accessibility.setValue(Geometry.AppQuery(app), scope: scope,
+                                                selector: selector, value: parsed.positionals[1])
+        let code: Int32 = change.verified.map { $0 ? 0 : 1 } ?? 2
+        let outcome = change.verified.map { $0 ? "satisfied" : "unsatisfied" }
+            ?? "unknown: the field value could not be read back"
+        emit(["ok": code == 0, "app": app, "scope": scope.rawValue,
+              "verified": change.verified.map { $0 as Any } ?? NSNull(), "outcome": outcome,
+              "before": change.before.map { $0 as Any } ?? NSNull(),
+              "after": change.after.map { $0 as Any } ?? NSNull(), "control": controlInfo(change.control)])
+        exit(code)
     } catch { fail(error) }
 
 case "choose":

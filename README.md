@@ -18,6 +18,27 @@ macctl key cmd+q --app Calculator
 macctl restore                               # hand focus back to where it was
 ```
 
+For apps that expose accessibility controls, use structured discovery and direct
+field edits without screen coordinates:
+
+```bash
+macctl browser Safari                         # observed page URL, window and tabs
+macctl controls Safari --scope window --role AXTextField
+macctl set-value "Example App" "sample query" --scope window --identifier search-field
+macctl activate "Example App" "Search" --scope window --role AXButton --exact
+```
+
+Control identifiers come from the app. A missing identifier, duplicate match, or
+incomplete tree is reported explicitly. `set-value` checks the field's value after
+writing; it does not submit a form or claim that downstream work completed.
+Browser state keeps the committed page URL separate from unsubmitted address-bar
+text. Tab indices are observations rather than persistent handles, and background
+tab URLs may be unavailable through accessibility.
+
+`navigate` follows the browser's external-open policy, which may create a tab.
+Its `settled` result describes app-text stability, not proof of page readiness;
+check `browser` and an expected page condition after navigation.
+
 ## Your data stays on your Mac
 
 `macctl` reads your screen, so this matters, and it is checkable:

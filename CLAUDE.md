@@ -26,7 +26,10 @@ moves followed by a long wait.
    [Naming an app](#naming-an-app)).
 4. **Get it on screen:** `macctl launch App`, then
    `macctl wait-for App "expected text" --timeout 30`. For a browser,
-   `macctl navigate App <url>` opens the page and returns the moment it loads.
+   `macctl navigate App <url>` asks the browser to open a URL, which may create
+   a new tab according to the browser's settings. It waits for stable app text;
+   that is not proof the requested page has loaded. Use `macctl browser App`
+   to check the observed document URL, then wait for a page-specific condition.
    After a click that triggers a load or transition, `macctl wait-idle App`
    returns the moment the content settles. Never `sleep N` and hope.
 5. **Act by label wherever there is one:**
@@ -60,8 +63,8 @@ macctl restore                                    # put the person back where th
 ## Three things to internalise
 
 **A click that lands on nothing reports success.** Posting an event returns
-nothing, and neither the OS nor the app says whether it landed. So every input
-command — `click-text` included — reports `"verified": false`. `click-text`
+nothing, and neither the OS nor the app says whether it landed. Event delivery
+commands, including `click-text`, report `"verified": false`. `click-text`
 satisfied means "found a unique label and delivered a click," not "the app
 reacted." If it matters, follow up with `verify` or `wait-for`.
 
@@ -103,7 +106,7 @@ agents do not make every short name ambiguous. Helper processes (renderers, GPU
 processes) are never candidates.
 
 The app's window is its **front** on-screen window; a sheet or dialog in front
-of the main window *is* the window. Input commands bring the app forward first
+of the main window *is* the window. Pixel and keyboard input bring the app forward first
 and wait for the window server to agree. If it will not come — another app's
 modal dialog, a full-screen Space — they refuse with exit 4 and name what is in
 front.
@@ -117,11 +120,44 @@ web canvas.
 **Accessibility**: acts on a named element, so there is no coordinate to miss.
 Needs Accessibility permission.
 
-- `macctl controls App` — every actionable control by name, role and value.
-- `macctl activate App "<control>"` — press a button or checkbox, or open a
-  popup. Refuses (exit 4) if the name is ambiguous.
+- `macctl controls App --scope window` — controls in the selected accessible
+  window, with role, value, identifier, URL, bounds and editability where exposed.
+  Prefer this scope during normal UI work. The default `--scope app` preserves
+  whole-app discovery, including menus and other windows.
+- Filter discovery with `--role AXTextField`, `--match "Search"`, or
+  `--identifier ID`. `--exact` disables substring fallback for label/value matching.
+- `macctl activate App "<control>" --scope window` — press a button or checkbox,
+  or open a popup. Reuse the same scope and selectors used for discovery. A label
+  can be omitted when `--role` or `--identifier` uniquely selects the control.
+- `macctl set-value App "text" --scope window --identifier ID` — set an editable
+  field through its accessibility value, then read it back. This does not type
+  into whichever field happens to have keyboard focus, and does not submit a form.
+  `verified` describes the field value only, not a save or downstream response.
 - `macctl choose App "<popup's current value>" "<new value>"` — set a popup.
   Reports `before`/`after`, so it acts and verifies in one call.
+
+Labels and identifiers are app-provided and can repeat. Discovery reports
+`truncated` and exits 2 if the tree was incomplete; actions refuse to infer
+uniqueness from incomplete discovery. Multiple matches require a more precise
+selector. Secure, disabled, or non-settable fields are refused before a value write.
+Native control actions address AX elements directly and can work while the app is
+in the background. Window scope uses the focused or main accessible window, or
+the sole accessible window when neither is exposed, and prefers an attached sheet.
+
+```bash
+macctl controls Safari --scope window --role AXTextField
+macctl controls Safari --scope window --role AXLink --match "Documentation"
+macctl set-value "Example App" "sample query" --scope window --identifier search-field
+macctl activate "Example App" "Search" --scope window --role AXButton --exact
+```
+
+Use `macctl browser Safari` for browser state instead of an ad hoc `osascript`
+query. It reports the selected window, committed page URL, address-bar text and
+observed tabs from native accessibility. Address-bar text may be an unsubmitted
+edit; it is never substituted for the page URL. Missing attributes remain null
+with a reason. Tab indices and identifiers are observations, not persistent tab
+handles. Background-tab URLs may be unavailable. Read state again after a
+navigation or tab change, and stop dependent actions when a command fails.
 
 Pixels have one hard limit: **a modal sheet or popup runs its own event-tracking
 loop and silently swallows posted mouse clicks.** In System Settings the button
@@ -253,6 +289,7 @@ macctl awake [--while-pid N | --seconds N | --off | --status]
 macctl launch <app> [--via-spotlight] [--timeout S]
 macctl window|focus <app>
 macctl restore [--forget]
+macctl browser <app>
 macctl navigate <app> <url>        macctl wait-idle <app>
 macctl move|click|press|release <app> <fx> <fy>
 macctl drag <app> <fx1> <fy1> <fx2> <fy2>
@@ -260,7 +297,9 @@ macctl scroll <app> <fx> <fy> <amount>
 macctl key <chord> [--app APP]     macctl type [--app APP] <text>...
 macctl text <app>                  macctl shot|read|find <app>|--screen ...
 macctl click-text|verify|wait-for <app> <text> [--region] [--timeout S] [--gone]
-macctl controls <app>              macctl activate <app> <control>
+macctl controls <app> [--scope window] [--role ROLE] [--match TEXT] [--identifier ID]
+macctl activate <app> [<control>] [--scope window] [--role ROLE] [--identifier ID]
+macctl set-value <app> <value> --scope window --identifier ID
 macctl choose <app> <popup> <value>
 macctl dock list                   macctl dock menu <app> <item>
 ```

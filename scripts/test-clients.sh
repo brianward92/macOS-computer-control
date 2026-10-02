@@ -9,4 +9,4 @@ if ! command -v node >/dev/null || ! node --experimental-strip-types --version >
   exit 1
 fi
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s Tests/Clients -p 'test_python.py' -v
-node --experimental-strip-types --test Tests/Clients/typescript.test.mjs
+node --experimental-strip-types --test Tests/Clients/*.test.mjs

@@ -79,16 +79,132 @@ export const read = (app: string) =>
 
 /** The app's text via accessibility, OCR as fallback. Prefer over read for content. */
 export const text = (app: string) => (observation('text', app).text as string) ?? ''
-/** Open a URL in a browser and return once the page has loaded. */
+/**
+ * Ask the browser to open a URL, then wait for observed text to settle.
+ * Its external-open policy may create a tab. Settled text is not proof of
+ * page readiness; verify the intended page state.
+ */
 export const navigate = (app: string, url: string, timeout = 15) =>
   run('navigate', app, url, '--timeout', timeout)
 /** Return the instant the app's text stops changing, instead of a fixed sleep. */
 export const waitIdle = (app: string, timeout = 10) => run('wait-idle', app, '--timeout', timeout)
-/** Actionable controls by name, via accessibility. */
-export const controls = (app: string) =>
-  observation('controls', app).controls as { role: string; label: string; value?: string; at: [number, number] }[]
-/** Press a control by name via accessibility. Works where posted clicks are swallowed. */
-export const activate = (app: string, control: string) => run('activate', app, control)
+
+export interface BrowserWindow {
+  identifier: string | null
+  title: string | null
+  /** AX attribute used to select the observed window. */
+  source: string
+}
+
+export interface BrowserPage {
+  /** Committed document URL, separate from any address-bar edit. */
+  url: string | null
+  title: string | null
+  /** Null means the browser did not expose this loading signal. */
+  loaded: boolean | null
+  loadingProgress: number | null
+  busy: boolean | null
+  source: string | null
+  /** Why committed document evidence could not be established, when applicable. */
+  reason: string | null
+}
+
+export interface BrowserAddress {
+  /** Address-bar text may be an uncommitted edit, not the document URL. */
+  value: string | null
+  focused: boolean | null
+  source: string | null
+}
+
+export interface BrowserTab {
+  index: number | null
+  title: string | null
+  selected: boolean | null
+  /** Observed AX identifier, not a durable tab handle. */
+  identifier: string | null
+}
+
+export interface BrowserSnapshot extends Record<string, unknown> {
+  ok: boolean
+  readAt: string
+  app: string
+  pid: number
+  source: 'accessibility'
+  window: BrowserWindow
+  page: BrowserPage
+  address: BrowserAddress
+  tabs: BrowserTab[]
+  complete: boolean
+  outcome?: string
+}
+
+/** Full successful browser AX snapshot, including page, address and exposed tabs.
+ * Check `complete` before treating omitted information as absent.
+ */
+export const browser = (app: string): BrowserSnapshot =>
+  observation('browser', '--', app) as BrowserSnapshot
+
+/** Native AX control evidence. Null means the attribute was not exposed. */
+export interface Control {
+  role: string
+  label: string
+  value: string | null
+  identifier: string | null
+  url: string | null
+  placeholder: string | null
+  /** Screen points, top-left origin; not window-relative fractions. */
+  at: [number, number]
+  /** Screen-point x, y, width, height, or null if unavailable. */
+  bounds: [number, number, number, number] | null
+  focused: boolean | null
+  enabled: boolean
+  pressable: boolean
+  valueSettable: boolean
+  secure: boolean
+}
+
+export interface ControlSelector {
+  /** `app` is the CLI default; `window` limits the search to the front window. */
+  scope?: 'app' | 'window'
+  role?: string
+  identifier?: string
+  match?: string
+  /** Match the whole label instead of a substring. */
+  exact?: boolean
+}
+
+function selectorArgs(options: ControlSelector): string[] {
+  const args: string[] = []
+  for (const name of ['scope', 'role', 'identifier', 'match'] as const) {
+    const value = options[name]
+    if (value !== undefined) args.push(`--${name}`, value)
+  }
+  if (options.exact) args.push('--exact')
+  return args
+}
+
+/** Accessible controls filtered by label, role or identifier. Selectors combine. */
+export const controls = (app: string, options: ControlSelector = {}): Control[] =>
+  observation('controls', ...selectorArgs(options), '--', app).controls as Control[]
+
+/** Press one accessible control by name or selectors; refuse ambiguity.
+ * Verify the effect afterwards; delivery alone does not establish app state.
+ */
+export function activate(app: string, control: string, options?: ControlSelector): Result
+export function activate(app: string, options: ControlSelector): Result
+export function activate(app: string, controlOrOptions: string | ControlSelector,
+                         options: ControlSelector = {}): Result {
+  const positional = typeof controlOrOptions === 'string' ? [app, controlOrOptions] : [app]
+  const selectors = typeof controlOrOptions === 'string' ? options : controlOrOptions
+  return run('activate', ...selectorArgs(selectors), '--', ...positional)
+}
+
+/** Set a selected control's native AX value and return before/after/verified.
+ * Exit 0 is exact readback, 1 observed mismatch, 2 unknown. This does not submit
+ * a form or establish any later application effect.
+ */
+export const setValue = (app: string, value: string, options: ControlSelector) =>
+  run('set-value', ...selectorArgs(options), '--', app, value)
 /** Set a popup menu to a value via accessibility; the result carries before/after. */
 export const choose = (app: string, popup: string, value: string) => run('choose', app, popup, value)
 /** The frontmost app right now. */

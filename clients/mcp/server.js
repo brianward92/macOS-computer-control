@@ -12,6 +12,8 @@
  */
 const { execFile } = require('node:child_process')
 
+const SELECTORS = { scope: 'string?', role: 'string?', identifier: 'string?', match: 'string?', exact: 'boolean?' }
+
 const TOOLS = [
   { name: 'doctor', desc: 'Which capabilities are permitted right now.', args: {} },
   { name: 'apps', desc: 'Running applications that have windows.', args: {} },
@@ -20,13 +22,15 @@ const TOOLS = [
   { name: 'focus', desc: 'Bring an app to the front and stop.', args: { app: 'string' } },
   { name: 'restore', desc: 'Last step of every run: bring back the app that was in front before the first focus change. forget clears the record without moving focus.', args: { forget: 'boolean?' } },
   { name: 'launch', desc: 'Launch an app and wait for its window.', args: { app: 'string' } },
-  { name: 'navigate', desc: 'Open a URL in a browser and return when the page has loaded. Reliable — do not type URLs by keystroke.', args: { app: 'string', url: 'string', timeout: 'number?' } },
+  { name: 'navigate', desc: 'Ask the browser to open a URL, then wait for observed text to settle. External-open policy may create a tab. Settled text is not proof of page readiness; verify the intended page state.', args: { app: 'string', url: 'string', timeout: 'number?' } },
+  { name: 'browser', desc: 'Read a browser AX snapshot: app, window, page, address and exposed tabs. Check complete before treating omitted information as absent. Does not run browser scripts.', args: { app: 'string' } },
   { name: 'wait_idle', desc: "Return the instant an app's text stops changing, after a click or load. Use instead of a fixed sleep.", args: { app: 'string', timeout: 'number?' } },
   { name: 'text', desc: "An app's text via accessibility: fast, verbatim, whole page in one call. PREFER this for reading content; OCR (read/find) is the fallback.", args: { app: 'string' } },
   { name: 'read', desc: 'OCR: every text line with a click POINT. For reading content prefer text; use read/find to locate something to click.', args: { app: 'string' } },
   { name: 'find', desc: 'Where a piece of text is on screen (OCR, returns a click point).', args: { app: 'string', text: 'string' } },
-  { name: 'controls', desc: 'List an app\'s actionable controls by name via accessibility. The accessibility answer to read.', args: { app: 'string' } },
-  { name: 'activate', desc: 'Press a control by name via accessibility. Works where posted clicks are swallowed (modal sheets, popups).', args: { app: 'string', control: 'string' } },
+  { name: 'controls', desc: 'Read accessible controls, optionally filtered by role, identifier or label match. Selectors combine. scope defaults to app; window limits to the front window. exact matches the whole label.', args: { app: 'string', ...SELECTORS } },
+  { name: 'activate', desc: 'Press one accessible control selected by the positional control label or selectors. Refuses ambiguous targets. scope defaults to app. Delivery does not verify the resulting app state.', args: { app: 'string', control: 'string?', ...SELECTORS } },
+  { name: 'set_value', desc: 'Set one selected control\'s native AX value and read it back. Select by match, role or identifier. Returns before/after and verified: true (exit 0 exact readback), false (exit 1 observed mismatch), or null (exit 2 unknown). Does not submit a form.', args: { app: 'string', value: 'string', ...SELECTORS } },
   { name: 'choose', desc: 'Set a popup menu to a value via accessibility; reports before/after so it self-verifies.', args: { app: 'string', popup: 'string', value: 'string' } },
   {
     name: 'click',
@@ -49,20 +53,34 @@ const TOOLS = [
 // A type ending in '?' is optional.
 const schema = (args) => ({
   type: 'object',
-  properties: Object.fromEntries(Object.entries(args).map(([k, t]) => [k, { type: t.replace('?', '') }])),
+  properties: Object.fromEntries(Object.entries(args).map(([k, t]) => [k, {
+    type: t.replace('?', ''), ...(k === 'scope' ? { enum: ['app', 'window'], default: 'app' } : {}),
+  }])),
   required: Object.keys(args).filter((k) => !args[k].endsWith('?')),
 })
+
+function selectorArgs(a) {
+  const args = []
+  for (const name of ['scope', 'role', 'identifier', 'match']) {
+    if (a[name] !== undefined) args.push(`--${name}`, a[name])
+  }
+  if (a.exact) args.push('--exact')
+  return args
+}
 
 function argvFor(name, a = {}) {
   switch (name) {
     case 'window': case 'launch': case 'read': case 'apps': case 'doctor':
-    case 'text': case 'controls': case 'focus': case 'front':
+    case 'text': case 'focus': case 'front':
       return [name.replace('_', '-'), a.app].filter(Boolean)
     case 'restore': return ['restore', ...(a.forget ? ['--forget'] : [])]
     case 'find': return ['find', a.app, a.text]
     case 'navigate': return ['navigate', a.app, a.url, '--timeout', a.timeout ?? 15]
     case 'wait_idle': return ['wait-idle', a.app, '--timeout', a.timeout ?? 10]
-    case 'activate': return ['activate', a.app, a.control]
+    case 'browser': return ['browser', '--', a.app]
+    case 'controls': return ['controls', ...selectorArgs(a), '--', a.app]
+    case 'activate': return ['activate', ...selectorArgs(a), '--', a.app, ...(a.control === undefined ? [] : [a.control])]
+    case 'set_value': return ['set-value', ...selectorArgs(a), '--', a.app, a.value]
     case 'choose': return ['choose', a.app, a.popup, a.value]
     case 'click': return ['click', a.app, a.fx, a.fy, '--count', a.count ?? 1]
     case 'scroll': return ['scroll', a.app, a.fx, a.fy, a.amount]

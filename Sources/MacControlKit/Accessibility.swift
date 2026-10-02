@@ -36,6 +36,12 @@ public enum Accessibility {
         case actionFailed(String)
         case notAPopup(String)
         case valueNotInMenu(value: String, choices: [String])
+        case emptySelector
+        case incompleteSearch
+        case disabled(String)
+        case notSettable(String)
+        case secureField(String)
+        case scopeChanged
 
         public var description: String {
             switch self {
@@ -59,7 +65,48 @@ public enum Accessibility {
                 return "the control \"\(name)\" is not a popup menu"
             case .valueNotInMenu(let value, let choices):
                 return "no menu item matches \"\(value)\"; choices are \(choices.joined(separator: ", "))"
+            case .emptySelector:
+                return "name a control, role, or exact identifier before acting"
+            case .incompleteSearch:
+                return "the accessibility search was incomplete; observe again or narrow the scope before acting"
+            case .disabled(let name):
+                return "the control \"\(name)\" is disabled"
+            case .notSettable(let name):
+                return "the value of \"\(name)\" cannot be set through accessibility"
+            case .secureField(let name):
+                return "the control \"\(name)\" is a secure field"
+            case .scopeChanged:
+                return "the accessible window or control changed during discovery; observe it again"
             }
+        }
+    }
+
+    public enum Scope: String, Sendable, CaseIterable { case app, window }
+
+    /// Filters are combined. Identifiers and roles are exact and case-sensitive;
+    /// human labels, values, and placeholders use the usual folded text match.
+    public struct Selector: Sendable, Equatable {
+        public let needle: String?
+        public let role: String?
+        public let identifier: String?
+        public let exact: Bool
+
+        public init(needle: String? = nil, role: String? = nil,
+                    identifier: String? = nil, exact: Bool = false) {
+            self.needle = needle
+            self.role = role
+            self.identifier = identifier
+            self.exact = exact
+        }
+
+        public var isEmpty: Bool {
+            [needle, role, identifier].compactMap { $0 }
+                .allSatisfy { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        }
+
+        var described: String {
+            [needle, role, identifier.map { "identifier=\($0)" }]
+                .compactMap { $0 }.joined(separator: " ")
         }
     }
 
@@ -78,22 +125,56 @@ public enum Accessibility {
         public let enabled: Bool
         /// Whether the control exposes the press action at all.
         public let pressable: Bool
+        public let identifier: String?
+        public let url: String?
+        public let placeholder: String?
+        public let bounds: CGRect?
+        public let focused: Bool?
+        public let valueSettable: Bool
+        public let secure: Bool
 
         public init(role: String, label: String, value: String?, center: CGPoint,
-                    enabled: Bool, pressable: Bool) {
+                    enabled: Bool, pressable: Bool, identifier: String? = nil,
+                    url: String? = nil, placeholder: String? = nil, bounds: CGRect? = nil,
+                    focused: Bool? = nil, valueSettable: Bool = false, secure: Bool = false) {
             self.role = role
             self.label = label
             self.value = value
             self.center = center
             self.enabled = enabled
             self.pressable = pressable
+            self.identifier = identifier
+            self.url = url
+            self.placeholder = placeholder
+            self.bounds = bounds
+            self.focused = focused
+            self.valueSettable = valueSettable
+            self.secure = secure
         }
 
-        /// Everything a caller might match against: label and value.
-        var haystacks: [String] { [label, value].compactMap { $0 }.filter { !$0.isEmpty } }
+        /// Machine identifiers and destinations deliberately do not participate
+        /// in human-label matching.
+        var haystacks: [String] { [label, value, placeholder].compactMap { $0 }.filter { !$0.isEmpty } }
 
         /// How the control reads in an error or an ambiguity list.
-        var described: String { "\(role) \(label.isEmpty ? (value ?? "") : label)" }
+        var described: String {
+            let name = label.isEmpty ? (placeholder ?? value ?? "") : label
+            return "\(role) \(name)" + (identifier.map { " [\($0)]" } ?? "")
+        }
+    }
+
+    public struct Discovery: Sendable, Equatable {
+        public let controls: [Control]
+        public let truncated: Bool
+        public let visited: Int
+    }
+
+    public struct ValueChange: Sendable, Equatable {
+        public let control: Control
+        public let before: String?
+        public let after: String?
+        /// nil means the app accepted AXValue but its value could not be read.
+        public let verified: Bool?
     }
 
     /// A control paired with the tree element behind it, so a match can be
@@ -114,35 +195,108 @@ public enum Accessibility {
         return nil
     }
 
-    private static func actionNames(_ element: AXUIElement) -> [String] {
+    /// Selection and mutation require distinguishing an absent optional
+    /// attribute from a failed read. Otherwise an unreadable identifier or
+    /// label can hide a second match in an otherwise complete tree.
+    private static func checkedCopy(_ element: AXUIElement, _ attribute: String) throws -> AnyObject? {
+        var value: AnyObject?
+        switch AXUIElementCopyAttributeValue(element, attribute as CFString, &value) {
+        case .attributeUnsupported, .noValue:
+            return nil
+        case .success:
+            guard let value else { throw AXError.incompleteSearch }
+            return value
+        default:
+            throw AXError.incompleteSearch
+        }
+    }
+
+    private static func checkedString(_ element: AXUIElement, _ attribute: String) throws -> String? {
+        guard let raw = try checkedCopy(element, attribute) else { return nil }
+        if let s = raw as? String { return s }
+        if let n = raw as? NSNumber { return n.stringValue }
+        // Some controls expose non-text AXValue objects. They are not strings
+        // to match, but their successful read is not a communication failure.
+        return nil
+    }
+
+    private static func actionNames(_ element: AXUIElement) throws -> [String] {
         var names: CFArray?
-        guard AXUIElementCopyActionNames(element, &names) == .success,
-              let list = names as? [String] else { return [] }
-        return list
+        switch AXUIElementCopyActionNames(element, &names) {
+        case .actionUnsupported, .attributeUnsupported, .noValue, .notImplemented:
+            return []
+        case .success:
+            guard let list = names as? [String] else { throw AXError.incompleteSearch }
+            return list
+        default:
+            throw AXError.incompleteSearch
+        }
     }
 
-    private static func center(_ element: AXUIElement) -> CGPoint {
+    private static func valueIsSettable(_ element: AXUIElement) throws -> Bool {
+        var settable = DarwinBoolean(false)
+        switch AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &settable) {
+        case .attributeUnsupported, .noValue, .notImplemented:
+            return false
+        case .success:
+            return settable.boolValue
+        default:
+            throw AXError.incompleteSearch
+        }
+    }
+
+    private static func isEnabled(_ element: AXUIElement) throws -> Bool {
+        guard let raw = try checkedCopy(element, kAXEnabledAttribute as String) else { return true }
+        guard let enabled = raw as? NSNumber else { throw AXError.incompleteSearch }
+        return enabled.boolValue
+    }
+
+    private static func bounds(_ element: AXUIElement) -> CGRect? {
         var origin = CGPoint.zero, size = CGSize.zero
-        if let p = copy(element, kAXPositionAttribute as String) { AXValueGetValue(p as! AXValue, .cgPoint, &origin) }
-        if let s = copy(element, kAXSizeAttribute as String) { AXValueGetValue(s as! AXValue, .cgSize, &size) }
-        return CGPoint(x: (origin.x + size.width / 2).rounded(), y: (origin.y + size.height / 2).rounded())
+        guard let p = copy(element, kAXPositionAttribute as String),
+              let s = copy(element, kAXSizeAttribute as String),
+              CFGetTypeID(p) == AXValueGetTypeID(), CFGetTypeID(s) == AXValueGetTypeID(),
+              AXValueGetValue(p as! AXValue, .cgPoint, &origin),
+              AXValueGetValue(s as! AXValue, .cgSize, &size),
+              origin.x.isFinite, origin.y.isFinite, size.width.isFinite, size.height.isFinite
+        else { return nil }
+        return CGRect(origin: origin, size: size)
     }
 
-    private static func label(_ element: AXUIElement) -> String {
+    private static func label(_ element: AXUIElement) throws -> String {
         for attribute in [kAXTitleAttribute, kAXDescriptionAttribute, kAXHelpAttribute] {
-            if let value = string(element, attribute as String), !value.isEmpty { return value }
+            if let value = try checkedString(element, attribute as String), !value.isEmpty { return value }
         }
         return ""
     }
 
-    private static func control(from element: AXUIElement, role: String) -> Control {
-        Control(
+    private static func control(from element: AXUIElement, role: String) throws -> Control {
+        // Establish security before any AXValue read. A failed subrole query
+        // must not turn a protected text field into an ordinary one.
+        let secure: Bool
+        if role == "AXSecureTextField" {
+            secure = true
+        } else {
+            secure = try checkedString(element, kAXSubroleAttribute as String) == "AXSecureTextField"
+        }
+        let rect = bounds(element)
+        let canSet = try valueIsSettable(element)
+        let rawURL = copy(element, "AXURL")
+        let url = (rawURL as? URL)?.absoluteString ?? (rawURL as? String)
+        return try Control(
             role: role,
             label: label(element),
-            value: string(element, kAXValueAttribute as String),
-            center: center(element),
-            enabled: (copy(element, kAXEnabledAttribute as String) as? NSNumber)?.boolValue ?? true,
-            pressable: actionNames(element).contains(kAXPressAction as String)
+            value: secure ? nil : checkedString(element, kAXValueAttribute as String),
+            center: rect.map { CGPoint(x: $0.midX.rounded(), y: $0.midY.rounded()) } ?? .zero,
+            enabled: isEnabled(element),
+            pressable: actionNames(element).contains(kAXPressAction as String),
+            identifier: checkedString(element, kAXIdentifierAttribute as String),
+            url: url,
+            placeholder: checkedString(element, "AXPlaceholderValue"),
+            bounds: rect,
+            focused: (copy(element, kAXFocusedAttribute as String) as? NSNumber)?.boolValue,
+            valueSettable: canSet,
+            secure: secure
         )
     }
 
@@ -151,7 +305,7 @@ public enum Accessibility {
     private static let interestingRoles: Set<String> = [
         "AXButton", "AXPopUpButton", "AXMenuButton", "AXCheckBox", "AXRadioButton",
         "AXSlider", "AXTextField", "AXTextArea", "AXComboBox", "AXDisclosureTriangle",
-        "AXSegmentedControl", "AXTabGroup", "AXStepper", "AXLink", "AXMenuItem",
+        "AXSegmentedControl", "AXTabGroup", "AXStepper", "AXLink", "AXMenuItem", "AXSecureTextField",
     ]
 
     /// The application element for a query, with a messaging timeout set.
@@ -174,16 +328,48 @@ public enum Accessibility {
         _ element: AXUIElement,
         depth: Int = 0,
         budget: inout Int,
+        truncated: inout Bool,
         into found: inout [Match]
     ) {
-        guard depth < 40, budget > 0 else { return }
+        guard depth < 100, budget > 0 else { truncated = true; return }
         budget -= 1
-        let role = string(element, kAXRoleAttribute as String) ?? "AXUnknown"
-        if interestingRoles.contains(role) {
-            found.append((control(from: element, role: role), element))
+        // Role is required for classifying controls. An inaccessible node may
+        // conceal a second matching control, even if its siblings remain readable.
+        let role = copy(element, kAXRoleAttribute as String) as? String
+        if role == nil || role?.isEmpty == true { truncated = true }
+        if let role, interestingRoles.contains(role) {
+            do {
+                found.append((try control(from: element, role: role), element))
+            } catch {
+                // Do not let a metadata read failure hide an ambiguous match.
+                truncated = true
+            }
         }
-        if let children = copy(element, kAXChildrenAttribute as String) as? [AXUIElement] {
-            for child in children { walk(child, depth: depth + 1, budget: &budget, into: &found) }
+        do {
+            let children = try childElements(element)
+            for (index, child) in children.enumerated() {
+                walk(child, depth: depth + 1, budget: &budget, truncated: &truncated, into: &found)
+                if budget == 0 { if index + 1 < children.count { truncated = true }; break }
+            }
+        } catch {
+            truncated = true
+        }
+    }
+
+    /// Unsupported children or an absent value are normal for leaves. A failed
+    /// AX request, or a successful response of the wrong type, is not an empty
+    /// subtree and must never establish uniqueness for an action.
+    private static func childElements(_ element: AXUIElement) throws -> [AXUIElement] {
+        var raw: AnyObject?
+        let status = AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &raw)
+        switch status {
+        case .attributeUnsupported, .noValue:
+            return []
+        case .success:
+            guard let children = raw as? [AXUIElement] else { throw AXError.incompleteSearch }
+            return children
+        default:
+            throw AXError.incompleteSearch
         }
     }
 
@@ -305,12 +491,62 @@ public enum Accessibility {
         return Settled(text: current, stabilised: false, waited: Date().timeIntervalSince(start))
     }
 
-    private static func elements(_ query: Geometry.AppQuery) throws -> [Match] {
-        let (app, _) = try appElement(query)
+    private struct Snapshot {
+        let app: AXUIElement
+        let root: AXUIElement
+        let matches: [Match]
+        let truncated: Bool
+        let visited: Int
+    }
+
+    private static func elementAttribute(_ element: AXUIElement, _ attribute: String) -> AXUIElement? {
+        guard let raw = copy(element, attribute), CFGetTypeID(raw) == AXUIElementGetTypeID() else { return nil }
+        return (raw as! AXUIElement)
+    }
+
+    /// Window scope excludes the menu bar and other windows. A modal sheet
+    /// owns interaction while attached, so prefer it to the document behind it.
+    private static func root(_ app: AXUIElement, scope: Scope, name: String) throws -> AXUIElement {
+        guard scope == .window else { return app }
+        func isWindow(_ element: AXUIElement) -> Bool {
+            let role = copy(element, kAXRoleAttribute as String) as? String
+            return role == "AXWindow" || role == "AXSheet"
+        }
+        let focused = elementAttribute(app, kAXFocusedWindowAttribute as String).flatMap { isWindow($0) ? $0 : nil }
+        let main = elementAttribute(app, kAXMainWindowAttribute as String).flatMap { isWindow($0) ? $0 : nil }
+        // Safari can expose an AXScrollArea in AXWindows. It is not a window
+        // and must not become the scope just because it is the sole entry.
+        let windows = (copy(app, kAXWindowsAttribute as String) as? [AXUIElement] ?? []).filter(isWindow)
+        guard let window = focused ?? main ?? (windows.count == 1 ? windows.first : nil) else {
+            throw AXError.noWindow(name)
+        }
+        let children = try childElements(window)
+        var sheets: [AXUIElement] = []
+        for child in children {
+            guard let role = copy(child, kAXRoleAttribute as String) as? String, !role.isEmpty else {
+                throw AXError.incompleteSearch
+            }
+            if role == "AXSheet" { sheets.append(child) }
+        }
+        guard sheets.count <= 1 else { throw AXError.scopeChanged }
+        return sheets.first ?? window
+    }
+
+    private static func snapshot(_ query: Geometry.AppQuery, scope: Scope) throws -> Snapshot {
+        let (app, name) = try appElement(query)
+        enableWebAccessibility(app)
+        let selected = try root(app, scope: scope, name: name)
         var budget = 6000
+        var truncated = false
         var found: [Match] = []
-        walk(app, budget: &budget, into: &found)
-        return found
+        walk(selected, budget: &budget, truncated: &truncated, into: &found)
+        return Snapshot(app: app, root: selected, matches: found, truncated: truncated, visited: 6000 - budget)
+    }
+
+    private static func elements(_ query: Geometry.AppQuery) throws -> [Match] {
+        let result = try snapshot(query, scope: .app)
+        guard !result.truncated else { throw AXError.incompleteSearch }
+        return result.matches
     }
 
     /// Every actionable control in an app's windows, for discovery.
@@ -320,7 +556,14 @@ public enum Accessibility {
     /// with no coordinate-guessing. For a standard app it is the faster and
     /// surer way in.
     public static func controls(_ query: Geometry.AppQuery) throws -> [Control] {
-        try elements(query).map(\.control)
+        try discover(query).controls
+    }
+
+    public static func discover(_ query: Geometry.AppQuery, scope: Scope = .app,
+                                selector: Selector = Selector()) throws -> Discovery {
+        let result = try snapshot(query, scope: scope)
+        return Discovery(controls: filter(selector, from: result.matches.map(\.control)),
+                         truncated: result.truncated, visited: result.visited)
     }
 
     // MARK: - Acting
@@ -334,14 +577,44 @@ public enum Accessibility {
     /// folds case and lookalikes the same way on-screen text does, so a name
     /// read off `controls` matches what the caller types.
     public static func select(_ needle: String, from controls: [Control]) -> Result<Int, AXError> {
-        let wanted = Text.fold(needle)
-        let exact = controls.indices.filter { controls[$0].haystacks.contains { Text.fold($0) == wanted } }
-        let pool = exact.isEmpty
-            ? controls.indices.filter { controls[$0].haystacks.contains { Text.fold($0).contains(wanted) } }
-            : exact
-        guard let first = pool.first else { return .failure(.noControl(app: "", needle: needle)) }
+        select(Selector(needle: needle), from: controls)
+    }
+
+    private static func matchingIndices(_ selector: Selector, from controls: [Control]) -> [Int] {
+        controls.indices.filter { index in
+            let control = controls[index]
+            if let role = selector.role, control.role != role { return false }
+            if let identifier = selector.identifier, control.identifier != identifier { return false }
+            guard let needle = selector.needle else { return true }
+            let wanted = Text.fold(needle)
+            guard !wanted.isEmpty else { return false }
+            return control.haystacks.contains {
+                selector.exact ? Text.fold($0) == wanted : Text.fold($0).contains(wanted)
+            }
+        }
+    }
+
+    /// Discovery lists every matching control; it does not discard substring
+    /// results just because one of the controls has an exact label.
+    public static func filter(_ selector: Selector, from controls: [Control]) -> [Control] {
+        matchingIndices(selector, from: controls).map { controls[$0] }
+    }
+
+    /// Selection is shared by both mutations. Partial discovery never proves
+    /// uniqueness, even when the observed portion contains just one match.
+    public static func select(_ selector: Selector, from controls: [Control],
+                              truncated: Bool = false) -> Result<Int, AXError> {
+        guard !selector.isEmpty else { return .failure(.emptySelector) }
+        guard !truncated else { return .failure(.incompleteSearch) }
+        var pool = matchingIndices(selector, from: controls)
+        if let needle = selector.needle, !selector.exact {
+            let wanted = Text.fold(needle)
+            let exact = pool.filter { controls[$0].haystacks.contains { Text.fold($0) == wanted } }
+            if !exact.isEmpty { pool = exact }
+        }
+        guard let first = pool.first else { return .failure(.noControl(app: "", needle: selector.described)) }
         guard pool.count == 1 else {
-            return .failure(.ambiguous(needle: needle, matches: pool.map { controls[$0].described }))
+            return .failure(.ambiguous(needle: selector.described, matches: pool.map { controls[$0].described }))
         }
         return .success(first)
     }
@@ -361,15 +634,79 @@ public enum Accessibility {
     /// before doing anything, if the name is ambiguous.
     @discardableResult
     public static func activate(_ query: Geometry.AppQuery, matching needle: String) throws -> Control {
-        let candidates = try elements(query)
-        let (control, element): (Control, AXUIElement)
-        do { (control, element) = try unique(needle, among: candidates) }
-        catch AXError.noControl { throw AXError.noControl(app: query.raw, needle: needle) }
-        guard control.pressable else { throw AXError.notActionable(control.label) }
+        try activate(query, selector: Selector(needle: needle))
+    }
+
+    /// These preconditions are separate from selection so that a disabled or
+    /// protected unique match is refused, rather than ignored in favour of a
+    /// less precise but operable match.
+    public static func validateMutation(_ control: Control, settingValue: Bool = false) -> Result<Void, AXError> {
+        guard control.enabled else { return .failure(.disabled(control.described)) }
+        guard !control.secure else { return .failure(.secureField(control.described)) }
+        if settingValue {
+            guard control.valueSettable else { return .failure(.notSettable(control.described)) }
+        } else {
+            guard control.pressable else { return .failure(.notActionable(control.described)) }
+        }
+        return .success(())
+    }
+
+    private static func target(_ query: Geometry.AppQuery, scope: Scope,
+                               selector: Selector, settingValue: Bool) throws -> Match {
+        guard !selector.isEmpty else { throw AXError.emptySelector }
+        func selected(_ result: Snapshot) throws -> Match {
+            do {
+                let index = try select(selector, from: result.matches.map(\.control),
+                                       truncated: result.truncated).get()
+                return result.matches[index]
+            } catch AXError.noControl {
+                throw AXError.noControl(app: query.raw, needle: selector.described)
+            }
+        }
+        let first = try snapshot(query, scope: scope)
+        let original = try selected(first)
+        // Resolve again in a fresh tree: changing tabs can replace a field
+        // without changing its containing window, and a new duplicate can make
+        // a formerly unique label ambiguous. Neither permits reusing the first
+        // match, even if that AX element still answers property reads.
+        let result = try snapshot(query, scope: scope)
+        let currentTarget = try selected(result)
+        guard CFEqual(first.root, result.root), CFEqual(original.element, currentTarget.element) else {
+            throw AXError.scopeChanged
+        }
+        // Re-read both identity and capabilities immediately before delivery.
+        // AX has no atomic compare-and-act transaction, so callers must still
+        // verify the effect after mutation.
+        let currentRoot = try root(result.app, scope: scope, name: query.raw)
+        guard CFEqual(result.root, currentRoot) else { throw AXError.scopeChanged }
+        guard let role = string(currentTarget.element, kAXRoleAttribute as String) else { throw AXError.scopeChanged }
+        let current = try control(from: currentTarget.element, role: role)
+        guard !filter(selector, from: [current]).isEmpty else { throw AXError.scopeChanged }
+        try validateMutation(current, settingValue: settingValue).get()
+        return (current, currentTarget.element)
+    }
+
+    @discardableResult
+    public static func activate(_ query: Geometry.AppQuery, scope: Scope = .app,
+                                selector: Selector) throws -> Control {
+        let (control, element) = try target(query, scope: scope, selector: selector, settingValue: false)
         guard AXUIElementPerformAction(element, kAXPressAction as CFString) == .success else {
             throw AXError.actionFailed(control.label)
         }
         return control
+    }
+
+    /// Set AXValue on the uniquely selected native control, then read that same
+    /// element back. Verification compares the literal value, without folding.
+    public static func setValue(_ query: Geometry.AppQuery, scope: Scope = .app,
+                                selector: Selector, value: String) throws -> ValueChange {
+        let (control, element) = try target(query, scope: scope, selector: selector, settingValue: true)
+        guard AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, value as CFString) == .success else {
+            throw AXError.actionFailed(control.described)
+        }
+        let after = string(element, kAXValueAttribute as String)
+        return ValueChange(control: control, before: control.value, after: after,
+                           verified: after.map { $0 == value })
     }
 
     /// Open the popup identified by `popup` and pick the item matching `value`.
@@ -399,8 +736,13 @@ public enum Accessibility {
         usleep(300_000)
 
         var budget = 2000
+        var truncated = false
         var opened: [Match] = []
-        walk(element, budget: &budget, into: &opened)
+        walk(element, budget: &budget, truncated: &truncated, into: &opened)
+        guard !truncated else {
+            AXUIElementPerformAction(element, kAXCancelAction as CFString)
+            throw AXError.incompleteSearch
+        }
         let items = opened.filter { $0.control.role == "AXMenuItem" }
         let wanted = Text.fold(value)
         let exact = items.first { Text.fold($0.control.label) == wanted }
@@ -415,7 +757,7 @@ public enum Accessibility {
         }
         usleep(300_000)
 
-        let after = string(element, kAXValueAttribute as String) ?? label(element)
+        let after = try string(element, kAXValueAttribute as String) ?? label(element)
         return (before, after)
     }
 }
