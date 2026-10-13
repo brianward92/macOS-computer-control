@@ -101,6 +101,13 @@ Xcode Command Line Tools are enough; full Xcode is not needed.
 
    Set `BIN_DIR` to install somewhere else: `BIN_DIR=/usr/local/bin bash scripts/install.sh`.
 
+   The install also sets up [Rectangle](https://rectangleapp.com) for window
+   snapping (`scripts/install-rectangle.sh`, into `~/Applications`), bound to
+   `ctrl+shift+cmd+left` / `ctrl+shift+cmd+right` for the left / right half.
+   Rectangle needs its own Accessibility grant. Scripts can snap the front
+   window without a keystroke: `open -g "rectangle://execute-action?name=left-half"`.
+   Skip it with `WINDOW_MANAGER=0 bash scripts/install.sh`.
+
 3. Grant permissions. Open System Settings › Privacy & Security and enable your
    terminal app (Terminal, iTerm, …) — whichever app will run `macctl` — under:
 

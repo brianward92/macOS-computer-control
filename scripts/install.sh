@@ -16,4 +16,10 @@ case ":$PATH:" in
   *) echo "WARNING: $BIN_DIR is not on your PATH" ;;
 esac
 
+# Window snapping is part of the default install; WINDOW_MANAGER=0 skips it.
+if [ "${WINDOW_MANAGER:-1}" != 0 ]; then
+  echo
+  bash scripts/install-rectangle.sh
+fi
+
 "$REPO/bin/macctl" doctor || true

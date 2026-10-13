@@ -236,6 +236,24 @@ almost always one of these:
   screen-capture stack wedged; try once more, then tell the person.
 - **Retrying a refusal.** Exit 4 will not change by itself. Change the request.
 
+## Snapping windows
+
+The default install sets up Rectangle (`scripts/install-rectangle.sh`, into
+`~/Applications`). `ctrl+shift+cmd+left` / `ctrl+shift+cmd+right` snap the front
+window to the left / right half. From a script, prefer the URL scheme, which
+needs no focus change and no keystroke:
+
+```bash
+open -g "rectangle://execute-action?name=left-half"    # also right-half, maximize, ...
+```
+
+It acts on the frontmost window, so `macctl focus App` first if needed. Check
+the result with `macctl` window bounds rather than assuming it moved.
+Rectangle needs its own Accessibility grant. Until a person grants it, both
+shortcuts and URL actions do nothing and report no error. macOS does not let
+a program grant itself or another app that permission. Before opening System
+Settings for someone, say so: it takes them away from the app they are using.
+
 ## Things that will catch you out
 
 - **Matching prefers the whole label.** `click-text App 7` clicks the button
