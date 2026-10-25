@@ -80,7 +80,7 @@ let controlFlags = [
 let commands: [Command] = [
     Command("doctor", summary: "what is permitted and what is not"),
     Command("apps", summary: "running apps with windows"),
-    Command("awake", summary: "stop the display sleeping during a long run", flags: [
+    Command("awake", summary: "hold display sleep and user activity during a long run", flags: [
         Flag("while-pid", value: "N", summary: "hold until process N exits (preferred)"),
         Flag("seconds", value: "N", summary: "hold for N seconds"),
         Flag("off", summary: "release our hold"),
@@ -189,7 +189,7 @@ let notes: [String] = [
     "key and type send keystrokes to whatever is in front. Give --app to bring the intended app to the front first and refuse if it will not come; for type, --app must come first and everything after it is text.",
     "click-text --timeout rides out UI transitions of a running app: a missing window or one not yet at the front is retried until the deadline. An app that is not running, or an ambiguous name, is refused at once. wait-for keeps waiting for an app to start.",
     "Every command requests a normal wake for a dark display or a reported lock, and waits briefly for session state to settle. A persistent lock still refuses input.",
-    "Before a long unattended run: macctl awake --while-pid $$. A display that sleeps mid-run comes back locked, and nothing here can get past a password prompt.",
+    "Before a long unattended run: macctl awake --while-pid $$. Use the persistent driver's pid; the hold ends when it exits. Password locks require authentication.",
     "The first command that moves focus records which app was in front; later ones leave that record alone. Finish every run with macctl restore, which brings that app back and clears the record. front and doctor report the record as origin.",
 ]
 
@@ -636,7 +636,9 @@ watchdog.start()
 // Before anything else, and before `doctor` reads its state, so doctor reports
 // the screen it is about to hand to the next command rather than the one it
 // found. `help` prints text and touches no screen.
-if command.name != "help" {
+// A new hold must establish its durable assertions before requesting a wake.
+// Merely inspecting/releasing a hold should not wake the display.
+if command.name != "help" && command.name != "awake" {
     wakeScreenFirst()
 }
 
@@ -684,11 +686,11 @@ case "doctor":
     exit(d.allGood ? 0 : 3)
 
 case "awake":
-    // The counterpart to waking a dark screen, and the more important half for
-    // anything that runs unattended: a display that sleeps mid-run comes back
-    // LOCKED, and a lock is not something this tool can recover from. Prefer
-    // --while-pid over --seconds, so the assertion ends exactly when the run
-    // does instead of on a guess about how long it will take.
+    // Keep display sleep and user activity asserted for the run. Prefer
+    // --while-pid so the hold ends with the persistent driving process.
+    let lifetimeCount = ["seconds", "while-pid"].filter { parsed.option($0) != nil }.count
+    let modeCount = lifetimeCount + (parsed.flag("off") ? 1 : 0) + (parsed.flag("status") ? 1 : 0)
+    guard modeCount == 1, parsed.positionals.isEmpty else { usageFailure() }
     if parsed.flag("off") {
         emit(["ok": true, "released": System.Awake.release()])
         break
@@ -701,12 +703,14 @@ case "awake":
     }
     let whilePID = parsed.option("while-pid").flatMap { pid_t($0) }
     let seconds = parsed.option("seconds").flatMap { Int($0) }
-    if whilePID == nil, seconds == nil { usageFailure() }
+    do { _ = try System.Awake.arguments(seconds: seconds, whilePID: whilePID) }
+    catch { fail(String(describing: error), code: 2) }
     if let whilePID, kill(whilePID, 0) != 0 {
         fail("no process \(whilePID) to tie the assertion to", code: 4)
     }
     do {
         let pid = try System.Awake.hold(seconds: seconds, whilePID: whilePID)
+        wakeScreenFirst()
         emit(["ok": true, "holding": Int(pid),
               "until": whilePID.map { "pid \($0) exits" } ?? "\(seconds ?? 0)s"])
     } catch { fail(error) }

@@ -178,12 +178,10 @@ public enum System {
 
     /// Holding the display awake, which is the other half of waking it.
     ///
-    /// `wakeScreen` recovers a screen that already went dark. This prevents it
-    /// going dark in the first place, and for anything long-running that is the
-    /// half that matters — because a display that sleeps while nobody is at the
-    /// machine usually comes back **locked**, and nothing here can get past a
-    /// password prompt. A recoverable problem becomes an unrecoverable one at
-    /// whatever point the run happened to reach.
+    /// `wakeScreen` recovers a dark display or a transient session flag. A
+    /// long-running driver also needs display and user-activity assertions to
+    /// prevent idle transitions between commands. A real password lock still
+    /// requires authentication.
     ///
     /// Delegates to `caffeinate`, the OS's own supported way to take a power
     /// assertion. Two reasons rather than taking `IOPMAssertionCreateWithName`
@@ -311,11 +309,37 @@ public enum System {
 
         static var pidFile: URL { System.cacheDirectory.appendingPathComponent("awake.pid") }
 
+        public enum HoldError: Error, CustomStringConvertible {
+            case invalidLifetime
+            case helperNotReady
+
+            public var description: String {
+                switch self {
+                case .invalidLifetime:
+                    return "choose exactly one positive seconds value (at most \(Int32.max)) or positive process ID"
+                case .helperNotReady:
+                    return "keep-awake helper did not establish its power assertions"
+                }
+            }
+        }
+
+        /// A PID hold ends when the watched process exits. Its explicit upper
+        /// bound prevents caffeinate's user-activity assertion expiring after
+        /// the default five seconds; it is not the expected run duration.
+        public static func arguments(seconds: Int? = nil, whilePID: pid_t? = nil) throws -> [String] {
+            guard (seconds != nil) != (whilePID != nil) else { throw HoldError.invalidLifetime }
+            if let seconds, seconds <= 0 || seconds > Int(Int32.max) { throw HoldError.invalidLifetime }
+            if let whilePID, whilePID <= 0 { throw HoldError.invalidLifetime }
+            var arguments = ["-d", "-i", "-u", "-t", String(seconds ?? Int(Int32.max))]
+            if let whilePID { arguments += ["-w", String(whilePID)] }
+            return arguments
+        }
+
         /// Is *anything* on this machine currently preventing display sleep?
         ///
-        /// Asked of the system rather than of our own pidfile, because the
-        /// useful question is whether the screen is safe, not whether we are the
-        /// one keeping it safe. A video call or a running build counts.
+        /// Asked of the system rather than of our own pidfile, so another
+        /// app's assertion counts too. This reports the assertion's presence;
+        /// display and session state must still be observed independently.
         public static var displaySleepPrevented: Bool {
             var out: Unmanaged<CFDictionary>?
             guard IOPMCopyAssertionsStatus(&out) == kIOReturnSuccess,
@@ -326,6 +350,29 @@ public enum System {
                 kIOPMAssertionTypePreventUserIdleDisplaySleep as String,
             ]
             return held.contains { (status[$0] ?? 0) > 0 }
+        }
+
+        public static func hasRequiredAssertions(_ assertions: [[String: Any]]) -> Bool {
+            let active = Set(assertions.compactMap { assertion -> String? in
+                guard let level = assertion[kIOPMAssertionLevelKey] as? NSNumber,
+                      level.intValue == Int(kIOPMAssertionLevelOn) else { return nil }
+                return assertion[kIOPMAssertionTypeKey] as? String
+            })
+            return active.isSuperset(of: [
+                kIOPMAssertionTypePreventUserIdleDisplaySleep as String,
+                kIOPMAssertionTypePreventUserIdleSystemSleep as String,
+                "UserIsActive",
+            ])
+        }
+
+        /// Check this helper, not an unrelated app's assertions. A spawned PID
+        /// alone is not evidence that the hold has actually started.
+        private static func assertionsReady(for pid: pid_t) -> Bool {
+            var out: Unmanaged<CFDictionary>?
+            guard IOPMCopyAssertionsByProcess(&out) == kIOReturnSuccess,
+                  let processes = out?.takeRetainedValue() as? [NSNumber: [[String: Any]]],
+                  let assertions = processes[NSNumber(value: pid)] else { return false }
+            return hasRequiredAssertions(assertions)
         }
 
         /// The executable behind a pid, if it is still alive.
@@ -359,10 +406,8 @@ public enum System {
         /// ends, however it ends.
         @discardableResult
         public static func hold(seconds: Int? = nil, whilePID: pid_t? = nil) throws -> pid_t {
-            release()
-            var arguments = ["-d", "-i"]      // no display sleep, no idle system sleep
-            if let whilePID { arguments += ["-w", String(whilePID)] }
-            else if let seconds { arguments += ["-t", String(seconds)] }
+            let arguments = try arguments(seconds: seconds, whilePID: whilePID)
+            let previous = holder
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
             process.arguments = arguments
@@ -370,7 +415,26 @@ public enum System {
             process.standardError = FileHandle.nullDevice
             try process.run()
             let pid = process.processIdentifier
-            try? String(pid).write(to: pidFile, atomically: true, encoding: .utf8)
+            let deadline = ProcessInfo.processInfo.systemUptime + 2
+            while process.isRunning && !assertionsReady(for: pid)
+                    && ProcessInfo.processInfo.systemUptime < deadline {
+                usleep(20_000)
+            }
+            guard process.isRunning && assertionsReady(for: pid) else {
+                if process.isRunning { process.terminate() }
+                throw HoldError.helperNotReady
+            }
+            do {
+                try String(pid).write(to: pidFile, atomically: true, encoding: .utf8)
+            } catch {
+                process.terminate()
+                throw error
+            }
+            // Replace a hold without an unprotected gap. Preserve it if the
+            // replacement cannot start or persist its ownership record.
+            if let previous, executable(of: previous) == "/usr/bin/caffeinate" {
+                kill(previous, SIGTERM)
+            }
             return pid
         }
 

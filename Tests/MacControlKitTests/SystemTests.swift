@@ -1,4 +1,5 @@
 import Foundation
+import IOKit.pwr_mgt
 import MacControlKit
 
 func runSystemTests(_ expect: (Bool, String) -> Void) {
@@ -50,4 +51,34 @@ func runSystemTests(_ expect: (Bool, String) -> Void) {
     let immediate = recover([lock], timeout: 0)
     expect(immediate.0.locked && immediate.3 == 0,
            "zero timeout requests wake but never invents an unlocked state")
+
+    let timed = try? System.Awake.arguments(seconds: 30)
+    expect(timed == ["-d", "-i", "-u", "-t", "30"],
+           "a timed hold includes user activity for its whole duration")
+    let watched = try? System.Awake.arguments(whilePID: 123)
+    expect(watched == ["-d", "-i", "-u", "-t", String(Int32.max), "-w", "123"],
+           "a process hold explicitly avoids the five-second activity default and watches its driver")
+    expect((try? System.Awake.arguments()) == nil, "an unbounded hold without a lifetime is refused")
+    expect((try? System.Awake.arguments(seconds: 30, whilePID: 123)) == nil,
+           "conflicting lifetimes are refused")
+    for seconds in [0, -1, Int.min, Int(Int32.max) + 1] {
+        expect((try? System.Awake.arguments(seconds: seconds)) == nil,
+               "nonpositive or overflowing hold durations are refused")
+    }
+    for pid: Int32 in [0, -1] {
+        expect((try? System.Awake.arguments(whilePID: pid)) == nil,
+               "nonpositive process IDs cannot watch a process group")
+    }
+    let types = ["PreventUserIdleDisplaySleep", "PreventUserIdleSystemSleep", "UserIsActive"]
+    let activeAssertions: [[String: Any]] = types.map {
+        [kIOPMAssertionTypeKey: $0, kIOPMAssertionLevelKey: NSNumber(value: kIOPMAssertionLevelOn)]
+    }
+    expect(System.Awake.hasRequiredAssertions(activeAssertions),
+           "all three active assertions establish readiness using the OS on-level (255)")
+    expect(!System.Awake.hasRequiredAssertions(Array(activeAssertions.dropLast())),
+           "display and idle assertions alone cannot establish user-activity readiness")
+    let inactive: [[String: Any]] = types.map {
+        [kIOPMAssertionTypeKey: $0, kIOPMAssertionLevelKey: NSNumber(value: kIOPMAssertionLevelOff)]
+    }
+    expect(!System.Awake.hasRequiredAssertions(inactive), "inactive assertions are not a hold")
 }

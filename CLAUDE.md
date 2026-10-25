@@ -20,8 +20,9 @@ moves followed by a long wait.
 1. **`macctl doctor` first.** Exit 0: everything is permitted. Exit 3: a
    permission is missing — stop and tell the person what to grant (the output
    says where). Nothing you send will land until they do.
-2. **Hold the display awake:** `macctl awake --while-pid $$`. A display that
-   sleeps mid-run comes back locked, and nothing here gets past a password.
+2. **Hold the display and user activity awake:** `macctl awake --while-pid $$`.
+   Use the persistent driver's PID; a short-lived shell ends its hold when it
+   exits. A hold cannot authenticate a password lock.
 3. **Name the app exactly.** `macctl apps` lists what is running (see
    [Naming an app](#naming-an-app)).
 4. **Get it on screen:** `macctl launch App`, then
@@ -344,9 +345,14 @@ wrappers. The CLI and `macctl help --json` are the complete contract.
 - `bash scripts/install.sh` — build and symlink into `~/.local/bin`.
 - `bash scripts/test.sh` — unit tests for the decision logic (app resolution,
   window selection, outcome rules, argument parsing, text folding, matching,
-  cropping, keystroke mapping, wake transitions) plus a CLI usage smoke test.
-  Pure unit tests do not touch the screen; CLI smoke commands may request a
-  normal wake. Nothing posts input.
+  cropping, keystroke mapping, wake transitions and hold lifetimes) plus a CLI
+  usage smoke test. Pure unit tests do not touch the screen; CLI smoke commands
+  may request a normal wake. Nothing posts input.
+- `bash scripts/test-awake.sh` — opt-in live power checks. Temporarily holds the
+  display awake, verifies user activity beyond five seconds and the observed
+  display relapse interval, and checks driver exit, timed expiry and release.
+  It uses isolated state and sends no input. `--sleep-first` also puts the display
+  to sleep before testing its recovery.
 - For a live check, Calculator is a safe target: launch it, drive it with
   `click-text` and `type --app Calculator`, verify the display, quit with
   `key cmd+q --app Calculator`.

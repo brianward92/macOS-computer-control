@@ -39,6 +39,26 @@ tab URLs may be unavailable through accessibility.
 Its `settled` result describes app-text stability, not proof of page readiness;
 check `browser` and an expected page condition after navigation.
 
+## Keeping a run awake
+
+Use `macctl awake --while-pid <driver-pid>` for an unattended run, or
+`macctl awake --seconds 300` for a timed hold. The hold asserts display sleep,
+idle sleep, and user activity for its lifetime. The PID must belong to the
+persistent driver: using a shell that exits after one command ends the hold
+immediately. `macctl awake --off` releases the tool's hold.
+
+The helper's assertions are checked before a new hold is reported. Replacing a
+hold establishes the replacement before releasing the old one. Inspecting or
+releasing a hold does not request a display wake.
+
+Before other commands, a dark display or a reported session lock triggers an
+ordinary wake and up to five seconds of observation, followed by a brief frame
+delay when needed. A transient session flag can clear without authentication.
+If the flag persists, input still refuses with exit 3.
+`wokeScreen.sessionWasLocked` and `wokeScreen.screenLocked` report the observed
+before/after lock states. No password or security setting changes.
+`displaySleepPrevented` reports an OS assertion, not proof the screen is awake.
+
 ## Your data stays on your Mac
 
 `macctl` reads your screen, so this matters, and it is checkable:

@@ -43,6 +43,14 @@ check 2 "empty identifier is a usage error" "$MACCTL" controls "Example App" --i
 check 2 "exact requires a label" "$MACCTL" controls "Example App" --exact
 check 2 "set-value requires a selector" "$MACCTL" set-value "Example App" text
 check 2 "activate rejects competing label arguments" "$MACCTL" activate "Example App" Save --match Cancel
+check 2 "awake rejects conflicting lifetimes" "$MACCTL" awake --seconds 30 --while-pid 1
+check 2 "awake rejects conflicting modes" "$MACCTL" awake --off --seconds 30
+check 2 "awake rejects zero seconds" "$MACCTL" awake --seconds 0
+check 2 "awake rejects negative seconds" "$MACCTL" awake --seconds -1
+check 2 "awake rejects malformed seconds" "$MACCTL" awake --seconds invalid
+check 2 "awake rejects zero pid" "$MACCTL" awake --while-pid 0
+check 2 "awake rejects negative pid" "$MACCTL" awake --while-pid -1
+check 2 "awake rejects stray arguments" "$MACCTL" awake --seconds 30 extra
 check 4 "restore with nothing recorded is refused before doing anything" "$MACCTL" restore
 check 0 "restore --forget with nothing recorded is fine" "$MACCTL" restore --forget
 check 0 "front reports origin null when nothing is recorded" \
