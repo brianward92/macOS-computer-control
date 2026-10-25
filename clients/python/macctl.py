@@ -6,6 +6,7 @@ because 2 is "could not observe", which is not the same as failure. Helpers
 that unwrap observation payloads raise ObservationUnknown for exit 2; an empty
 list/string or None therefore still means a successfully observed empty result.
 """
+
 from __future__ import annotations
 
 import json
@@ -35,7 +36,12 @@ class Result:
 
     @property
     def reason(self) -> str | None:
-        return self.data.get("outcome") or self.data.get("error") or self.stderr.strip() or None
+        return (
+            self.data.get("outcome")
+            or self.data.get("error")
+            or self.stderr.strip()
+            or None
+        )
 
 
 class ObservationError(RuntimeError):
@@ -55,9 +61,7 @@ class ObservationUnknown(ObservationError):
 
 
 def run(*args: str, check: bool = False) -> Result:
-    proc = subprocess.run(
-        ["macctl", *map(str, args)], capture_output=True, text=True
-    )
+    proc = subprocess.run(["macctl", *map(str, args)], capture_output=True, text=True)
     line = proc.stdout.strip().splitlines()
     data = json.loads(line[-1]) if line else {}
     result = Result(proc.returncode, data, proc.stderr)
@@ -79,11 +83,15 @@ def window(app: str) -> Result:
     return run("window", app, check=True)
 
 
-def click(app: str, fx: float, fy: float, count: int = 1, button: str = "left") -> Result:
+def click(
+    app: str, fx: float, fy: float, count: int = 1, button: str = "left"
+) -> Result:
     return run("click", app, fx, fy, "--count", count, "--button", button, check=True)
 
 
-def drag(app: str, fx1: float, fy1: float, fx2: float, fy2: float, steps: int = 24) -> Result:
+def drag(
+    app: str, fx1: float, fy1: float, fx2: float, fy2: float, steps: int = 24
+) -> Result:
     return run("drag", app, fx1, fy1, fx2, fy2, "--steps", steps, check=True)
 
 
@@ -133,10 +141,21 @@ def browser(app: str) -> dict[str, Any]:
     return _observation("browser", "--", app)
 
 
-def _selector_args(*, match: str | None, role: str | None,
-                   identifier: str | None, scope: str | None, exact: bool) -> list[str]:
+def _selector_args(
+    *,
+    match: str | None,
+    role: str | None,
+    identifier: str | None,
+    scope: str | None,
+    exact: bool,
+) -> list[str]:
     args = []
-    for name, value in (("scope", scope), ("role", role), ("identifier", identifier), ("match", match)):
+    for name, value in (
+        ("scope", scope),
+        ("role", role),
+        ("identifier", identifier),
+        ("match", match),
+    ):
         if value is not None:
             args.extend((f"--{name}", value))
     if exact:
@@ -144,42 +163,68 @@ def _selector_args(*, match: str | None, role: str | None,
     return args
 
 
-def controls(app: str, *, match: str | None = None, role: str | None = None,
-             identifier: str | None = None, scope: str | None = None,
-             exact: bool = False) -> list[dict[str, Any]]:
+def controls(
+    app: str,
+    *,
+    match: str | None = None,
+    role: str | None = None,
+    identifier: str | None = None,
+    scope: str | None = None,
+    exact: bool = False,
+) -> list[dict[str, Any]]:
     """Read accessible controls filtered by label, role or identifier.
 
     ``scope`` is ``app`` (the CLI default) or ``window``. Selectors combine;
     ``exact`` asks for a whole-label match instead of a substring.
     """
-    selectors = _selector_args(match=match, role=role, identifier=identifier, scope=scope, exact=exact)
+    selectors = _selector_args(
+        match=match, role=role, identifier=identifier, scope=scope, exact=exact
+    )
     return _observation("controls", *selectors, "--", app).get("controls", [])
 
 
-def activate(app: str, control: str | None = None, *, match: str | None = None,
-             role: str | None = None, identifier: str | None = None,
-             scope: str | None = None, exact: bool = False) -> Result:
+def activate(
+    app: str,
+    control: str | None = None,
+    *,
+    match: str | None = None,
+    role: str | None = None,
+    identifier: str | None = None,
+    scope: str | None = None,
+    exact: bool = False,
+) -> Result:
     """Press one accessible control by name or selectors; refuse ambiguity.
 
     ``control`` is the original positional label. It may be omitted when
     selecting by ``match``, ``role`` or ``identifier``. Verify the effect after
     activation; delivery alone does not establish the resulting app state.
     """
-    selectors = _selector_args(match=match, role=role, identifier=identifier, scope=scope, exact=exact)
+    selectors = _selector_args(
+        match=match, role=role, identifier=identifier, scope=scope, exact=exact
+    )
     positionals = [app] if control is None else [app, control]
     return run("activate", *selectors, "--", *positionals, check=True)
 
 
-def set_value(app: str, value: str, *, match: str | None = None,
-              role: str | None = None, identifier: str | None = None,
-              scope: str | None = None, exact: bool = False) -> Result:
+def set_value(
+    app: str,
+    value: str,
+    *,
+    match: str | None = None,
+    role: str | None = None,
+    identifier: str | None = None,
+    scope: str | None = None,
+    exact: bool = False,
+) -> Result:
     """Set one selected control's native AX value and return its readback.
 
     The payload carries ``before``, ``after`` and ``verified``. Exit 0 means
     exact readback, 1 an observed mismatch, and 2 an unknown result. A value
     write does not submit a form or establish any later application effect.
     """
-    selectors = _selector_args(match=match, role=role, identifier=identifier, scope=scope, exact=exact)
+    selectors = _selector_args(
+        match=match, role=role, identifier=identifier, scope=scope, exact=exact
+    )
     return run("set-value", *selectors, "--", app, value, check=True)
 
 
