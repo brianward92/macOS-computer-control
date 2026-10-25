@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Unit tests, then a smoke test of the CLI's argument handling. Nothing here
-# touches the screen or posts input.
+# posts input. CLI commands may request a normal display wake.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 

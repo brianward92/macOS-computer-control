@@ -88,7 +88,7 @@ answer:
 | 0 | satisfied | carry on |
 | 1 | unsatisfied — acted, observed, it did not happen | read the screen, then decide |
 | 2 | unknown — could not observe (reason given), or bad usage | look again; for usage, fix the command |
-| 3 | refused — permission missing, Secure Event Input held, screen locked, session not on the console | stop; only a person can fix this |
+| 3 | refused — permission missing, Secure Event Input held, session still locked after wake, session not on the console | inspect the reported condition; authentication or a person may be required |
 | 4 | refused before doing anything — no such app, ambiguous name, no window, app would not come to the front | fix the request; retrying will not change it |
 
 Fields worth reading: `outcome` (`satisfied`, `unsatisfied`, `unknown: why`,
@@ -290,11 +290,15 @@ Settings for someone, say so: it takes them away from the app they are using.
   permission is exit 3.
 - **Permissions need a terminal relaunch after granting.** The checks are
   process-cached with no live probe.
-- **A dark screen is handled** — woken (or the screen saver dismissed) before
-  reading, and reported as `wokeScreen`. If it cannot be woken, exit 3 rather
-  than reading a black frame.
-- **A locked screen is reported, not worked around.** Input refuses with exit
-  3; reads still work, so you can watch a machine you cannot touch.
+- **Wake recovery uses observed state.** A dark display or a session lock flag
+  requests an ordinary wake, followed by up to five seconds of observation and
+  a brief frame delay when needed. `wokeScreen.sessionWasLocked` and
+  `wokeScreen.screenLocked` report before and after state. A transient flag can
+  clear without a password. If the display cannot wake, exit 3 rather than
+  reading a black frame.
+- **A persistent lock still refuses input.** Credentials and security settings
+  are never changed. Reads can still work. `displaySleepPrevented` describes
+  an assertion's presence, not proof that the screen is awake.
 - **`dock menu` is the least predictable command.** It copes with an
   auto-hiding, magnifying Dock by revealing it and walking the pointer onto the
   icon, but takes a few seconds. Prefer `key cmd+q --app X` to quit an app.
@@ -340,8 +344,9 @@ wrappers. The CLI and `macctl help --json` are the complete contract.
 - `bash scripts/install.sh` — build and symlink into `~/.local/bin`.
 - `bash scripts/test.sh` — unit tests for the decision logic (app resolution,
   window selection, outcome rules, argument parsing, text folding, matching,
-  cropping, keystroke mapping) plus a CLI usage smoke test. Nothing touches the
-  screen or posts input.
+  cropping, keystroke mapping, wake transitions) plus a CLI usage smoke test.
+  Pure unit tests do not touch the screen; CLI smoke commands may request a
+  normal wake. Nothing posts input.
 - For a live check, Calculator is a safe target: launch it, drive it with
   `click-text` and `type --app Calculator`, verify the display, quit with
   `key cmd+q --app Calculator`.

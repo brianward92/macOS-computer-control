@@ -57,9 +57,9 @@ public enum System {
 
     /// Is the screen locked?
     ///
-    /// Reported, never worked around. Waking a locked screen gets you the
-    /// password prompt, and nothing this library does can or should get past
-    /// it. The point of detecting it is to say so instead of failing obscurely.
+    /// This is the observed session flag, not proof that a password is needed.
+    /// A normal wake can clear a transient flag. If it persists after recovery,
+    /// input is refused; credentials and lock settings are never changed.
     public static var isScreenLocked: Bool {
         guard let info = CGSessionCopyCurrentDictionary() as? [String: Any] else { return false }
         return (info["CGSSessionScreenIsLocked"] as? NSNumber)?.boolValue ?? false
@@ -69,12 +69,68 @@ public enum System {
     public struct Wake: Sendable {
         public let displayWasAsleep: Bool
         public let screenSaverWasRunning: Bool
+        public let sessionWasLocked: Bool
         public let locked: Bool
         public let awakeNow: Bool
 
         /// Did this actually have to do something? Drives whether it is worth
         /// reporting; a no-op wake should not clutter every result.
-        public var acted: Bool { displayWasAsleep || screenSaverWasRunning }
+        public var acted: Bool { displayWasAsleep || screenSaverWasRunning || sessionWasLocked }
+    }
+
+    /// One observation, separate from the wake action so transitions can be
+    /// exercised without touching the real display or session.
+    public struct WakeState: Sendable, Equatable {
+        public let displayAsleep: Bool
+        public let screenSaverRunning: Bool
+        public let locked: Bool
+
+        public init(displayAsleep: Bool, screenSaverRunning: Bool, locked: Bool) {
+            self.displayAsleep = displayAsleep
+            self.screenSaverRunning = screenSaverRunning
+            self.locked = locked
+        }
+
+        public var displayReady: Bool { !displayAsleep && !screenSaverRunning }
+        public var ready: Bool { displayReady && !locked }
+    }
+
+    /// Request an ordinary wake, then observe the result until the session is
+    /// usable or the deadline expires. A lock that persists remains a lock;
+    /// neither preferences nor another lock indicator override this evidence.
+    public static func recoverScreen(
+        timeout: TimeInterval,
+        observe: () -> WakeState,
+        requestActivity: () -> Void,
+        dismissSaver: () -> Void,
+        now: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+        pause: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
+    ) -> Wake {
+        let initial = observe()
+        guard !initial.ready else {
+            return Wake(displayWasAsleep: initial.displayAsleep,
+                        screenSaverWasRunning: initial.screenSaverRunning,
+                        sessionWasLocked: initial.locked,
+                        locked: initial.locked, awakeNow: initial.displayReady)
+        }
+        let deadline = now() + max(0, timeout)
+        requestActivity()
+        if initial.screenSaverRunning { dismissSaver() }
+        var current = observe()
+        while !current.ready && now() < deadline {
+            pause(min(0.15, max(0, deadline - now())))
+            current = observe()
+        }
+        // A woken display needs a frame before capture. Re-read afterward:
+        // the session can change while pixels become available.
+        if initial.displayAsleep && current.displayReady {
+            pause(0.4)
+            current = observe()
+        }
+        return Wake(displayWasAsleep: initial.displayAsleep,
+                    screenSaverWasRunning: initial.screenSaverRunning,
+                    sessionWasLocked: initial.locked,
+                    locked: current.locked, awakeNow: current.displayReady)
     }
 
     /// Wake the screen the way a person does: notice it is dark, tap the pad.
@@ -94,21 +150,18 @@ public enum System {
     /// `loginwindow`, and `isScreenLocked` still reports the truth afterwards.
     @discardableResult
     public static func wakeScreen(timeout: TimeInterval = 5) -> Wake {
-        let wasAsleep = isDisplayAsleep
-        let hadSaver = isScreenSaverRunning
-        guard wasAsleep || hadSaver else {
-            return Wake(displayWasAsleep: false, screenSaverWasRunning: false,
-                        locked: false, awakeNow: true)
-        }
-
         var assertion: IOPMAssertionID = 0
-        IOPMAssertionDeclareUserActivity(
-            "macctl is driving this machine" as CFString,
-            kIOPMUserActiveLocal,
-            &assertion
-        )
-
-        if hadSaver {
+        return recoverScreen(timeout: timeout, observe: {
+            WakeState(displayAsleep: isDisplayAsleep,
+                      screenSaverRunning: isScreenSaverRunning,
+                      locked: isScreenLocked)
+        }, requestActivity: {
+            IOPMAssertionDeclareUserActivity(
+                "macctl is driving this machine" as CFString,
+                kIOPMUserActiveLocal,
+                &assertion
+            )
+        }, dismissSaver: {
             let engines = NSRunningApplication.runningApplications(
                 withBundleIdentifier: "com.apple.ScreenSaver.Engine"
             )
@@ -118,22 +171,7 @@ public enum System {
             NSRunningApplication.runningApplications(
                 withBundleIdentifier: "com.apple.ScreenSaver.Engine"
             ).forEach { $0.forceTerminate() }
-        }
-
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if !isDisplayAsleep && !isScreenSaverRunning { break }
-            usleep(150_000)
-        }
-
-        // A woken display takes a moment to actually have pixels in it. Reading
-        // one frame too early is the same black image by another route.
-        if wasAsleep { usleep(400_000) }
-
-        return Wake(displayWasAsleep: wasAsleep,
-                    screenSaverWasRunning: hadSaver,
-                    locked: isScreenLocked,
-                    awakeNow: !isDisplayAsleep && !isScreenSaverRunning)
+        })
     }
 
     // MARK: - Staying awake

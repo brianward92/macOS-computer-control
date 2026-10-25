@@ -468,6 +468,7 @@ do {
 
 runBrowserTests { condition, message in expect(condition, message) }
 runControlTests { condition, message in expect(condition, message) }
+runSystemTests { condition, message in expect(condition, message) }
 
 if failures > 0 { exit(1) }
 print("ok: macctl unit tests")

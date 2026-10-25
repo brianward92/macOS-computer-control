@@ -188,7 +188,7 @@ let notes: [String] = [
     "Flags are --name or --name=value. Anything after a bare -- is positional. Unknown flags are errors, not ignored.",
     "key and type send keystrokes to whatever is in front. Give --app to bring the intended app to the front first and refuse if it will not come; for type, --app must come first and everything after it is text.",
     "click-text --timeout rides out UI transitions of a running app: a missing window or one not yet at the front is retried until the deadline. An app that is not running, or an ambiguous name, is refused at once. wait-for keeps waiting for an app to start.",
-    "Every command wakes a dark display first and reports it as wokeScreen. A locked screen is reported, never worked around.",
+    "Every command requests a normal wake for a dark display or a reported lock, and waits briefly for session state to settle. A persistent lock still refuses input.",
     "Before a long unattended run: macctl awake --while-pid $$. A display that sleeps mid-run comes back locked, and nothing here can get past a password prompt.",
     "The first command that moves focus records which app was in front; later ones leave that record alone. Finish every run with macctl restore, which brings that app back and clears the record. front and doctor report the record as origin.",
 ]
@@ -552,7 +552,7 @@ func requireInputPreconditions() {
         fail("this login session is not on the console; synthetic input goes nowhere", code: 3)
     }
     if System.isScreenLocked {
-        fail("the screen is locked; synthetic input goes to the password prompt", code: 3)
+        fail("the session still reports locked after wake; refusing input", code: 3)
     }
 }
 
@@ -569,13 +569,15 @@ func wakeScreenFirst() {
     wakeReport = [
         "displayWasAsleep": wake.displayWasAsleep,
         "screenSaverWasRunning": wake.screenSaverWasRunning,
+        "sessionWasLocked": wake.sessionWasLocked,
+        "screenLocked": wake.locked,
         "awakeNow": wake.awakeNow,
     ]
     if !wake.awakeNow {
         fail("the screen is asleep and did not wake; every capture would be black", code: 3)
     }
     if wake.locked {
-        note("woke the screen, but it is locked — everything behind the password prompt is unreachable.")
+        note("the session still reports locked after wake; input commands will refuse.")
     }
 }
 
@@ -676,7 +678,7 @@ case "doctor":
     if d.secureInputActive { note("Secure Event Input is held by some app; keystrokes are being discarded system-wide.") }
     if d.displayAsleep { note("The display is asleep and would not wake; captures will be black.") }
     if d.screenSaverRunning { note("The screen saver is running; captures show it, not the app.") }
-    if d.screenLocked { note("The screen is locked; input goes to the password prompt. Only a person at the machine can clear this.") }
+    if d.screenLocked { note("The session still reports locked after wake; input is refused. Authentication may be required.") }
     if !d.displaySleepPrevented { note("Nothing is holding the display awake. Before a long unattended run: macctl awake --while-pid $$") }
     if let origin { note("An earlier run left \(origin.name) recorded as the origin and never restored. macctl restore puts it back; macctl restore --forget drops it.") }
     exit(d.allGood ? 0 : 3)
